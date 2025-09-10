@@ -62,6 +62,9 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
     return undefined;
   };
   const sockets = new Set<any>();
+  // Shapes: tenant -> shapeId -> def
+  const shapes = new Map<string, Map<string, { model: string; where?: Record<string, unknown>; select?: string[] }>>();
+  const shapeIds = new Map<string, number>(); // tenant-local counters
   const broadcastPoke = (model?: string) => {
     for (const s of sockets) {
       try { s.send(JSON.stringify({ type: "poke", model })); } catch {}
@@ -140,8 +143,15 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
     },
     /** Return a tenant-bound API (no network). */
     withTenant(id?: string) { return buildApi(id); },
-    /** Register a shape (no-op for now to keep API stable). */
-    registerShape(_input: any) { /* no-op */ },
+    /** Register a shape and return its id (per-tenant namespace). */
+    registerShape(input: { tenantId?: string; model: string; where?: Record<string, unknown>; select?: string[] }) {
+      const tenantId = fixedTenant ?? input?.tenantId ?? "default";
+      const tid = shapeIds.get(tenantId) ?? 0; const idNum = tid + 1; shapeIds.set(tenantId, idNum);
+      let t = shapes.get(tenantId); if (!t) { t = new Map(); shapes.set(tenantId, t); }
+      const id = `shape_${idNum}`;
+      t.set(id, { model: input.model, where: input.where, select: input.select });
+      return { id } as const;
+    },
   });
   return {
     /**
@@ -188,9 +198,21 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
             const tenantId = getTenant(req);
             const u = new URL(`http://local${remainder}`);
             const model = u.searchParams.get("model");
+            const shapeId = u.searchParams.get("shapeId");
             const since = u.searchParams.get("since");
             if (!model) return json(res, 400, { ok: false, error: syncError("SYNC:CHANGE_REJECTED", "Missing model", { path: basePath }) });
-            const rows = Array.from(getModelMap(tenantId, model).values());
+            let rows = Array.from(getModelMap(tenantId, model).values());
+            if (shapeId) {
+              const t = shapes.get(tenantId); const def = t?.get(shapeId);
+              if (def && def.model === model) {
+                if (def.where) {
+                  rows = rows.filter((r: any) => Object.entries(def.where!).every(([k, v]) => (r as any)[k] === v));
+                }
+                if (def.select && def.select.length) {
+                  rows = rows.map((r: any) => def.select!.reduce((acc: any, k: string) => { acc[k] = r[k]; return acc; }, { id: r.id }));
+                }
+              }
+            }
             const cursor = String(tenantCursor.get(tenantId) ?? 0);
             if (since && since === cursor) return json(res, 200, { ok: true, value: { rows: [], cursor } });
             return json(res, 200, { ok: true, value: { rows, cursor } });

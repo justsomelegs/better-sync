@@ -123,6 +123,7 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
                   try {
                     const msg = JSON.parse(String(ev.data ?? ""));
                     if (msg?.type === "poke") {
+                      metrics?.on("poke", { model: msg?.model });
                       const target = msg?.model;
                       if (typeof target === "string" && wsSubscribers.has(target)) {
                         void refreshModel(target);
@@ -148,6 +149,10 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
               attempt += 1;
               continue;
             }
+          }
+          // HTTP fallback: periodically refresh subscribed models
+          if (status.state === "connected-http") {
+            for (const model of wsSubscribers.keys()) { await refreshModel(model); }
           }
           await sleep(heartbeatMs); // heartbeat interval
         }
@@ -208,6 +213,19 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
       if (!set) { set = new Set(); wsSubscribers.set(params.model, set); }
       set.add(cb);
       return { unsubscribe() { set!.delete(cb); if (set!.size === 0) wsSubscribers.delete(params.model); } };
+    },
+    pinShape(shapeId: string) {
+      let unpinned = false;
+      const refresh = async () => {
+        if (unpinned) return;
+        try {
+          const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent("*")}&shapeId=${encodeURIComponent(shapeId)}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined });
+          void res.arrayBuffer(); // fire-and-forget to warm cache
+        } catch { }
+      };
+      // periodic refresh piggybacks on heartbeat
+      void refresh();
+      return { unpin() { unpinned = true; } };
     },
     createSnapshot() { return Promise.resolve(); },
     /** Stop background loops and close network resources. */

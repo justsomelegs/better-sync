@@ -104,6 +104,8 @@ export interface SyncClient<TSchema extends SchemaModels = SchemaModels> {
     params: { model: TModel; where?: Partial<RowOf<TSchema, TModel>>; select?: TKeys },
     cb: (rows: Array<TProjected>) => void
   ): { unsubscribe(): void };
+  /** Pin a server shape for background refresh (HTTP fallback aware). */
+  pinShape(shapeId: string): { unpin(): void };
   /** Create a snapshot of local state (no-op placeholder for future). */
   createSnapshot(model?: string): Promise<void> | void;
   /** Return a tenant-bound client that automatically sends x-tenant-id. */
@@ -129,7 +131,7 @@ export interface SyncServer {
   api: {
     apply(input: { tenantId?: string; changes: Change[] }): Promise<Result<{ applied: boolean; cursor: Cursor }>>;
     withTenant(id?: string): SyncServer["api"];
-    registerShape(input: any): Promise<void> | void;
+    registerShape(input: { tenantId?: string; model: string; where?: Record<string, unknown>; select?: string[] }): Promise<{ id: string }> | { id: string };
   };
 }
 
