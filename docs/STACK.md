@@ -22,13 +22,7 @@ Describe the technical stack and provide a practical, beginner-friendly guide to
 ### Monorepo Layout
 ```
 / packages/
-  better-sync/                 # core client+server types & shared code
-  providers/
-    storage/                   # e.g., sqlite, postgres, idb, sqljs
-    transport/                 # e.g., ws, rpc
-    auth/                      # e.g., jwt
-  plugins/                     # optional plugins (rate-limit, etc.)
-  testkit/                     # @bettersync/testkit (fakes, conformance)
+  better-sync/                 # single package (core + providers + subpath exports)
 / examples/
   node-basic/                  # minimal Node example
   nextjs-app/                  # optional framework example
@@ -53,17 +47,13 @@ Example `package.json` excerpt (ESM-only):
 {
   "name": "better-sync",
   "type": "module",
-  "module": "dist/index.mjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.mjs"
-    },
-    "./providers/storage": {
-      "types": "./dist/providers/storage.d.ts",
-      "import": "./dist/providers/storage.mjs"
-    }
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./storage": { "types": "./dist/storage/index.d.ts", "import": "./dist/storage/index.js" },
+    "./transport": { "types": "./dist/transport/index.d.ts", "import": "./dist/transport/index.js" },
+    "./auth": { "types": "./dist/auth/index.d.ts", "import": "./dist/auth/index.js" }
   }
 }
 ```
@@ -151,7 +141,7 @@ npm install better-sync
 ```
 - Optional auth provider:
 ```bash
-npm install @better-sync/auth
+# No extra install; use subpath import better-sync/auth
 ```
 
 ### Packages We Use (and why)
@@ -230,10 +220,10 @@ import { jwt } from "better-sync/auth";
 - Prefer provider helpers for clarity and better types.
 
 ### Adding a New Storage Adapter (developer guide)
-1. Scaffold a package in `packages/providers/storage/<name>`.
-2. Implement `StorageAdapter` and optional per-model serializers.
+1. Add source under `packages/better-sync/src/storage/providers/<name>.ts`.
+2. Export functions from `packages/better-sync/src/storage/index.ts`.
 3. Run conformance: `@bettersync/testkit` (push/pull/cursor/conflict test matrix).
-4. Add exports to `better-sync` entry points.
+4. Ensure subpath export continues to tree-shake.
 5. Document defaults (wire normalization) and edge cases.
 
 ### Publishing Checklist

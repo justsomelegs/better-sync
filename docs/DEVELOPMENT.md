@@ -98,9 +98,6 @@ npx changeset init
 5. Create folders
 ```bash
 mkdir -p packages/better-sync
-mkdir -p packages/@better-sync/{auth,transport,storage}
-mkdir -p packages/plugins
-mkdir -p packages/testkit
 mkdir -p examples/{node-basic,nextjs-app}
 ```
 
@@ -120,20 +117,18 @@ Verification checklist:
   "version": "0.0.0",
   "type": "module",
   "sideEffects": false,
-  "module": "dist/index.mjs",
+  "module": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.mjs" },
-    "./storage": { "types": "./dist/storage.d.ts", "import": "./dist/storage.mjs" },
-    "./transport": { "types": "./dist/transport.d.ts", "import": "./dist/transport.mjs" },
-    "./auth": { "types": "./dist/auth.d.ts", "import": "./dist/auth.mjs" },
-    "./plugins/*": "./dist/plugins/*.mjs",
-    "./models": { "types": "./dist/models.d.ts", "import": "./dist/models.mjs" }
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./storage": { "types": "./dist/storage/index.d.ts", "import": "./dist/storage/index.js" },
+    "./transport": { "types": "./dist/transport/index.d.ts", "import": "./dist/transport/index.js" },
+    "./auth": { "types": "./dist/auth/index.d.ts", "import": "./dist/auth/index.js" }
   },
   "scripts": {
     "build": "tsc -b",
     "dev": "tsc -b -w",
-    "test": "vitest",
+    "test": "vitest --run",
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
@@ -155,8 +150,8 @@ Verification checklist:
 /**
  * better-sync — framework-agnostic, DB-agnostic sync engine.
  * @example
- * import { createSyncClient } from "better-sync";
- * const sync = createSyncClient({ baseUrl: "http://localhost:3000" });
+ * import { createClient } from "better-sync";
+* const sync = createClient({ baseUrl: "http://localhost:3000" });
  */
 export { createSyncClient } from "./public/client.js";
 export { betterSync } from "./public/server.js";
@@ -171,7 +166,7 @@ import type { SyncClient, SyncClientConfig } from "./types.js";
  * Create a sync client.
  * Uses WebSocket by default with HTTP fallback.
  * @example
- * const sync = createSyncClient({ baseUrl: "http://localhost:3000" });
+ * const sync = createClient({ baseUrl: "http://localhost:3000" });
  * await sync.connect();
  */
 export function createSyncClient(config: SyncClientConfig): SyncClient {
@@ -260,20 +255,20 @@ Verification checklist:
 
 Create minimal provider skeletons that compile and can be imported via syntactic sugar.
 
-1. Storage: `packages/@better-sync/storage/package.json`
+1. Storage (inside core) — `packages/better-sync/src/storage`
 ```json
 {
-  "name": "@better-sync/storage",
+  "name": "better-sync (internal storage module)",
   "version": "0.0.0",
   "type": "module",
   "module": "dist/index.mjs",
   "types": "dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.mjs" } },
-  "scripts": { "build": "tsc -b", "dev": "tsc -b -w", "test": "vitest", "lint": "biome check .", "typecheck": "tsc -p tsconfig.json --noEmit" }
+  "scripts": { "build": "tsc -b", "dev": "tsc -b -w", "test": "vitest --run", "lint": "biome check .", "typecheck": "tsc -p tsconfig.json --noEmit" }
 }
 ```
 
-2. Storage: `packages/@better-sync/storage/src/index.ts`
+2. Storage index (inside core): `packages/better-sync/src/storage/index.ts`
 ```ts
 export { idb } from "./providers/idb.js";
 export { sqlite, postgres } from "./providers/server-sql.js";
@@ -281,12 +276,12 @@ export { sqlite, postgres } from "./providers/server-sql.js";
 
 3. Storage providers
 ```ts
-// packages/@better-sync/storage/src/providers/idb.ts
+// packages/better-sync/src/storage/providers/idb.ts
 export function idb(options: { dbName: string }) {
   return { kind: "idb", options } as const; // TODO: real implementation
 }
 
-// packages/@better-sync/storage/src/providers/server-sql.ts
+// packages/better-sync/src/storage/providers/server-sql.ts
 export function sqlite(options: { file: string; ensureSchema?: boolean; autoMigrate?: boolean }) {
   return { dialect: "sqlite", options } as const; // TODO
 }
@@ -295,7 +290,7 @@ export function postgres(options: { connectionString?: string; pool?: unknown })
 }
 ```
 
-4. Transport: `packages/@better-sync/transport`
+4. Transport (inside core): `packages/better-sync/src/transport`
 ```ts
 // src/index.ts
 export { ws } from "./ws.js";
@@ -312,7 +307,7 @@ export function rpc(options: { baseUrl: string }) {
 }
 ```
 
-5. Auth: `packages/@better-sync/auth`
+5. Auth (inside core): `packages/better-sync/src/auth`
 ```ts
 // src/index.ts
 export { jwt } from "./jwt.js";
@@ -325,9 +320,9 @@ export function jwt(options: { jwksUrl: string }) {
 6. Re-export provider sugar from `better-sync` (optional convenience)
 ```ts
 // packages/better-sync/src/public/providers.ts (optional)
-export * from "@better-sync/storage";
-export * from "@better-sync/transport";
-export * from "@better-sync/auth";
+export * from "better-sync/storage";
+export * from "better-sync/transport";
+export * from "better-sync/auth";
 ```
 
 Verification checklist:
@@ -386,11 +381,11 @@ app.listen(3000, () => console.log("server on http://localhost:3000"));
 
 2. Minimal client (examples/node-basic/client.ts)
 ```ts
-import { createSyncClient } from "better-sync";
+import { createClient } from "better-sync";
 import { idb } from "better-sync/storage";
 import { ws } from "better-sync/transport";
 
-const sync = createSyncClient({
+const sync = createClient({
   baseUrl: "http://localhost:3000",
   storage: idb({ dbName: "app" }),
   transport: ws({ url: "ws://localhost:3000/api/sync" })
@@ -422,11 +417,11 @@ export default defineConfig({ test: { environment: "node" } });
 ```ts
 // packages/better-sync/test/client.smoke.test.ts
 import { describe, it, expect } from "vitest";
-import { createSyncClient } from "../src/public/client.js";
+import { createClient } from "../src/public/client.js";
 
 describe("client", () => {
   it("connects (skeleton)", async () => {
-    const c = createSyncClient({ baseUrl: "http://localhost:3000" });
+    const c = createClient({ baseUrl: "http://localhost:3000" });
     await c.connect();
     expect(c.getQueueStats().size).toBe(0);
   });

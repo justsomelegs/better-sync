@@ -5,7 +5,7 @@ Legend: [ ] not started, [x] done, [~] in progress
 ### Foundations
 - [x] Monorepo scaffold (npm workspaces + Turbo + Biome + Changesets + tsc)
 - [x] Aggregator package `better-sync` with subpath exports (`/auth`, `/transport`, `/storage`)
-- [x] Packages created: `@better-sync/auth`, `@better-sync/transport`, `@better-sync/storage`
+- [x] Consolidated to single package: providers under `packages/better-sync/src/{auth,transport,storage}`
 - [x] Batteries‑included defaults: core depends on default transport + storage
 - [x] Docs: STACK, DEVELOPMENT, GETTING‑STARTED, PACKAGES
 

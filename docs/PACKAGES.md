@@ -1,28 +1,23 @@
 ## Packages Overview (MVP)
 
 ### Objective
-Explain how the repository is split into packages and how users import from them.
+Explain the single-package layout and how users import from it.
 
-### Packages
-- better-sync: Aggregator with subpath exports.
-  - `better-sync` (core re-exports)
-  - `better-sync/auth`
-  - `better-sync/transport`
-  - `better-sync/storage`
-  - `better-sync/plugins/*` (future)
-- @better-sync/core: Core types and shared utilities.
-- @better-sync/auth: Auth providers (e.g., `jwt`).
-- @better-sync/transport: Transports (e.g., `ws`, `rpc`).
-- @better-sync/storage: Storage providers (e.g., `sqlite`, `postgres`, `idb`, `sqljs`).
+### Package layout
+- `better-sync` (single package)
+  - `better-sync` (core APIs)
+  - `better-sync/auth` (auth providers like `jwt`)
+  - `better-sync/transport` (transports like `ws`, `rpc`)
+  - `better-sync/storage` (storage providers like `sqlite`, `postgres`, `idb`)
 
-### Why this split?
-- Simple imports for users: `better-sync/{auth,transport,storage}`.
-- Leaf packages can be versioned and tested independently.
-- The aggregator keeps DX smooth and tree-shakeable.
+### Why this layout?
+- **DX-first**: one install, clear subpath imports: `better-sync/{auth,transport,storage}`.
+- **Tree-shakeable**: subpaths keep bundles small.
+- **Simple testing**: one Vitest config; smoke tests live in the core package.
 
 ### Example imports
 ```ts
-import { createSyncClient } from "better-sync";
+import { createClient } from "better-sync";
 import { jwt } from "better-sync/auth";
 import { ws, rpc } from "better-sync/transport";
 import { sqlite, idb } from "better-sync/storage";
