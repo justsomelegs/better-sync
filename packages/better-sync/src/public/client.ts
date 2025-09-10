@@ -1,4 +1,4 @@
-import type { SyncClient, SyncClientConfig, SchemaModels, ModelName, RowOf } from "./types.js";
+import type { SyncClient, SyncClientConfig, SchemaModels, ModelName, RowOf, SyncClientStatus } from "./types.js";
 
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 /**
@@ -31,9 +31,9 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
   const compressMinBytes = _config.compressMinBytes ?? 8_192; // 8KB
   let inFlight = 0;
   let stopped = false;
-  let status: import("./types.js").SyncClientStatus = { state: "idle" };
-  const statusSubscribers = new Set<(s: import("./types.js").SyncClientStatus) => void>();
-  function setStatus(s: import("./types.js").SyncClientStatus) {
+  let status: SyncClientStatus = { state: "idle" };
+  const statusSubscribers = new Set<(s: SyncClientStatus) => void>();
+  function setStatus(s: SyncClientStatus) {
     status = s; for (const cb of Array.from(statusSubscribers)) { try { cb(s); } catch {} }
   }
   function approxSize(obj: unknown): number {
@@ -116,7 +116,7 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
             await new Promise<void>((resolve, reject) => {
               try {
                 ws = new WebSocket(`${baseUrl.replace(/^http/, "ws")}${basePath}/ws`);
-                ws.onopen = () => { isConnected = true; setStatus({ state: "connected-ws" }); resolve(); };
+                ws.onopen = () => { isConnected = true; setStatus({ state: "connected-ws" }); metrics?.on("connect", { transport: "ws" }); resolve(); };
                 ws.onerror = () => { isConnected = false; ws = null; };
                 ws.onclose = () => { isConnected = false; };
                 ws.onmessage = (ev) => {
@@ -138,13 +138,13 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
             // fallback to HTTP probe
             try {
               const res = await fetch(`${baseUrl}${basePath}/sync.json`, { method: "GET" });
-              if (res.ok) { isConnected = true; setStatus({ state: "connected-http" }); }
+              if (res.ok) { isConnected = true; setStatus({ state: "connected-http" }); metrics?.on("connect", { transport: "http" }); }
               else throw new Error("http probe failed");
             } catch {
               isConnected = false;
               const base = Math.min(backoffMax, backoffBase * 2 ** attempt);
               const jitter = Math.floor(Math.random() * 100);
-              const nextMs = base + jitter; setStatus({ state: "backoff", attempt, nextMs }); await sleep(nextMs);
+              const nextMs = base + jitter; setStatus({ state: "backoff", attempt, nextMs }); metrics?.on("backoff", { attempt, nextMs }); await sleep(nextMs);
               attempt += 1;
               continue;
             }

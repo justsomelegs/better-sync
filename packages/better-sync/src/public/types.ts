@@ -33,11 +33,13 @@ export interface Change {
   value?: any;
   /** Partial update shape for updates. */
   patch?: Record<string, unknown>;
+  /** Optional conflict clock: last-write-wins by ts; actorId tie-breaker. */
+  clock?: { ts?: number | string; actorId?: string };
 }
 
 /** Optional metrics/events hook fired by the client to aid observability. */
 export interface SyncClientMetrics {
-  on(event: "connect" | "applyQueued" | "applySent" | "applyAck" | "poke" | "pull", data?: any): void;
+  on(event: "connect" | "applyQueued" | "applySent" | "applyAck" | "poke" | "pull" | "backoff", data?: any): void;
 }
 /** High-level connection status emitted by the client. */
 export type SyncClientStatus =
@@ -125,8 +127,11 @@ export interface SyncServer {
   attachWebSocket?(server: any): any; // optional WS attach helper
   fetch(): any; // framework handler adapter
   api: {
-    apply(input: { tenantId?: string; changes: Change[] }): Promise<Result<{ applied: boolean; cursor: string }>>;
+    apply(input: { tenantId?: string; changes: Change[] }): Promise<Result<{ applied: boolean; cursor: Cursor }>>;
     withTenant(id?: string): SyncServer["api"];
     registerShape(input: any): Promise<void> | void;
   };
 }
+
+/** Cursor is an opaque token; compare using string equality, do not parse. */
+export type Cursor = string & { readonly __opaque: unique symbol };

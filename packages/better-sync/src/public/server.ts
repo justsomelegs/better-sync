@@ -1,4 +1,5 @@
-import type { SyncServer, SyncServerConfig } from "./types.js";
+import type { SyncServer, SyncServerConfig, Cursor } from "./types.js";
+import { syncError } from "./errors.js";
 import { getSyncJsonMeta } from "./sync-json.js";
 /**
  * Create a sync server instance.
@@ -22,6 +23,8 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
   };
   // In-memory store: tenant -> model -> id -> row
   const store = new Map<string, Map<string, Map<string, any>>>();
+  // Separate clock store for conflict resolution: tenant -> model -> id -> clock
+  const clocks = new Map<string, Map<string, Map<string, { ts?: number | string; actorId?: string }>>>();
   const tenantCursor = new Map<string, number>();
   const getTenant = (req: any): string => String(req?.headers?.["x-tenant-id"] ?? "default");
   const getModelMap = (tenantId: string, model: string) => {
@@ -31,10 +34,17 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
     if (!m) { m = new Map(); t.set(model, m); }
     return m;
   };
-  const nextCursor = (tenantId: string) => {
+  const getClockMap = (tenantId: string, model: string) => {
+    let t = clocks.get(tenantId);
+    if (!t) { t = new Map(); clocks.set(tenantId, t); }
+    let m = t.get(model);
+    if (!m) { m = new Map(); t.set(model, m); }
+    return m;
+  };
+  const nextCursor = (tenantId: string): Cursor => {
     const cur = (tenantCursor.get(tenantId) ?? 0) + 1;
     tenantCursor.set(tenantId, cur);
-    return String(cur);
+    return String(cur) as Cursor;
   };
   const parseBody = async (req: any): Promise<any> => {
     if (req?.body) return req.body;
@@ -58,44 +68,64 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
     }
   };
   /** Coalesce and apply a batch of changes; delete-wins, update patches merged. */
-  const applyBatch = (tenantId: string, changes: Array<{ model: string; type: string; id: string; value?: any; patch?: Record<string, unknown> }>) => {
+  const applyBatch = (tenantId: string, changes: Array<{ model: string; type: string; id: string; value?: any; patch?: Record<string, unknown>; clock?: { ts?: number | string; actorId?: string } }>) => {
     // coalesce per model/id
-    const finalByModelId = new Map<string, Map<string, { action: "delete" | "upsert"; base?: any; patch?: Record<string, unknown> }>>();
+    const finalByModelId = new Map<string, Map<string, { action: "delete" | "upsert"; base?: any; patch?: Record<string, unknown>; clock?: { ts?: number | string; actorId?: string } }>>();
     for (const ch of changes) {
-      const { model, type, id, value, patch } = ch || {} as any;
+      const { model, type, id, value, patch, clock } = ch || ({} as any);
       if (!model || !type || !id) continue;
       let modelMap = finalByModelId.get(model);
       if (!modelMap) { modelMap = new Map(); finalByModelId.set(model, modelMap); }
-      const cur = modelMap.get(id) ?? { action: "upsert" as const, base: undefined as any, patch: undefined as Record<string, unknown> | undefined };
+      const cur = modelMap.get(id) ?? { action: "upsert" as const, base: undefined as any, patch: undefined as Record<string, unknown> | undefined, clock: undefined as any };
       if (type === "delete") {
-        modelMap.set(id, { action: "delete" });
+        // delete-wins; keep the latest clock for determinism
+        modelMap.set(id, { action: "delete", clock: clock ?? cur.clock });
         continue;
       }
       if (type === "insert") {
         // prefer explicit value, but do not drop accumulated patch
-        const next: typeof cur = { action: "upsert", base: value ?? cur.base, patch: cur.patch };
+        const next: typeof cur = { action: "upsert", base: value ?? cur.base, patch: cur.patch, clock: clock ?? cur.clock };
         modelMap.set(id, next);
         continue;
       }
       if (type === "update") {
         // merge patches shallowly
         const merged = { ...(cur.patch ?? {}), ...(patch ?? {}) };
-        modelMap.set(id, { action: "upsert", base: cur.base, patch: merged });
+        modelMap.set(id, { action: "upsert", base: cur.base, patch: merged, clock: clock ?? cur.clock });
         continue;
       }
     }
-    // apply to store
+    // apply to store with LWW+HLC semantics
+    const cmpClock = (a?: { ts?: number | string; actorId?: string }, b?: { ts?: number | string; actorId?: string }): number => {
+      if (!a && !b) return 0;
+      if (a && !b) return 1;
+      if (!a && b) return -1;
+      const at = typeof a!.ts === "string" ? Date.parse(a!.ts as string) : (a!.ts ?? 0);
+      const bt = typeof b!.ts === "string" ? Date.parse(b!.ts as string) : (b!.ts ?? 0);
+      if (at > bt) return 1;
+      if (at < bt) return -1;
+      const aa = a!.actorId ?? ""; const ba = b!.actorId ?? "";
+      if (aa > ba) return 1;
+      if (aa < ba) return -1;
+      return 0;
+    };
     for (const [model, idMap] of finalByModelId) {
       const rows = getModelMap(tenantId, model);
+      const cm = getClockMap(tenantId, model);
       for (const [id, fin] of idMap) {
+        const currentClock = cm.get(id);
+        const newer = cmpClock(fin.clock, currentClock) >= 0;
         if (fin.action === "delete") {
-          rows.delete(id);
+          if (newer || !currentClock) { rows.delete(id); if (fin.clock) cm.set(id, fin.clock); }
           continue;
         }
-        const current = rows.get(id) ?? {};
-        const base = fin.base ?? current;
-        const nextValue = { ...base, ...(fin.patch ?? {}) };
-        rows.set(id, nextValue);
+        if (newer || !currentClock) {
+          const current = rows.get(id) ?? {};
+          const base = fin.base ?? current;
+          const nextValue = { ...base, ...(fin.patch ?? {}) };
+          rows.set(id, nextValue);
+          if (fin.clock) cm.set(id, fin.clock);
+        }
       }
     }
   };
@@ -194,3 +224,6 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
     api: buildApi(),
   } as unknown as SyncServer;
 }
+
+/** Alias for symmetry with createSyncClient. */
+export const createSyncServer = betterSync;
