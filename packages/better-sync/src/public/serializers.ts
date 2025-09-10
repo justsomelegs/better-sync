@@ -58,3 +58,13 @@ export function compose<TRow>(
     decode(wire: any) { return list.reduceRight((acc, s) => s.decode(acc), wire); },
   } as const;
 }
+
+/** Adapter/default normalization helpers */
+export const defaults = {
+  uuidToString<TRow extends Record<string, any>, K extends ReadonlyArray<keyof TRow>>(..._keys: K): ModelSerializer<TRow, TRow> {
+    return { encode: (r: any) => r, decode: (w: any) => w } as any;
+  },
+  numericToString<TRow extends Record<string, any>, K extends ReadonlyArray<keyof TRow>>(..._keys: K): ModelSerializer<TRow, TRow> {
+    return { encode: (r: any) => r, decode: (w: any) => w } as any;
+  },
+};

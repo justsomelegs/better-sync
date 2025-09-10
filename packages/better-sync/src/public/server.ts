@@ -178,9 +178,9 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
         const url: string = String(req?.originalUrl ?? req?.url ?? "");
         if (url.startsWith(basePath)) {
           const remainder = url.slice(basePath.length);
-          if (_config.shouldRateLimit && await _config.shouldRateLimit(req)) return json(res, 429, { ok: false, error: { code: "SYNC:RATE_LIMITED", message: "Rate limited" } });
-          if (_config.forbid && await _config.forbid(req)) return json(res, 403, { ok: false, error: { code: "SYNC:FORBIDDEN", message: "Forbidden" } });
-          if (_config.authorize && !(await _config.authorize(req))) return json(res, 401, { ok: false, error: { code: "SYNC:UNAUTHORIZED", message: "Unauthorized" } });
+          if (_config.shouldRateLimit && await _config.shouldRateLimit(req)) return json(res, 429, { ok: false, error: syncError("SYNC:RATE_LIMITED", "Rate limited", { path: basePath }) });
+          if (_config.forbid && await _config.forbid(req)) return json(res, 403, { ok: false, error: syncError("SYNC:FORBIDDEN", "Forbidden", { path: basePath }) });
+          if (_config.authorize && !(await _config.authorize(req))) return json(res, 401, { ok: false, error: syncError("SYNC:UNAUTHORIZED", "Unauthorized", { path: basePath }) });
           if (method === "GET" && (remainder === "/sync.json" || remainder === "/sync.json/")) {
             return json(res, 200, getSyncJsonMeta(basePath));
           }
@@ -189,7 +189,7 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
             const u = new URL(`http://local${remainder}`);
             const model = u.searchParams.get("model");
             const since = u.searchParams.get("since");
-            if (!model) return json(res, 400, { ok: false, error: { code: "SYNC:CHANGE_REJECTED", message: "Missing model" } });
+            if (!model) return json(res, 400, { ok: false, error: syncError("SYNC:CHANGE_REJECTED", "Missing model", { path: basePath }) });
             const rows = Array.from(getModelMap(tenantId, model).values());
             const cursor = String(tenantCursor.get(tenantId) ?? 0);
             if (since && since === cursor) return json(res, 200, { ok: true, value: { rows: [], cursor } });
@@ -198,21 +198,21 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
           if (method === "POST" && (remainder === "/apply" || remainder === "/apply/")) {
             const body = await parseBody(req);
             const tenantId = getTenant(req);
-            if (body?.__tooLarge) return json(res, 413, { ok: false, error: { code: "SYNC:CHANGE_REJECTED", message: "Body too large" } });
+            if (body?.__tooLarge) return json(res, 413, { ok: false, error: syncError("SYNC:CHANGE_REJECTED", "Body too large", { path: basePath }) });
             // test hook for internal error simulation
-            if (body?.__force500) return json(res, 500, { ok: false, error: { code: "SYNC:SERVER_ERROR", message: "Forced error" } });
+            if (body?.__force500) return json(res, 500, { ok: false, error: syncError("SYNC:SERVER_ERROR", "Forced error", { path: basePath }) });
             // support single or batch
             const changes = Array.isArray(body?.changes)
               ? body.changes
               : body && body.model && body.change ? [{ model: body.model, ...body.change }] : [];
             if (!changes.length) {
-              return json(res, 400, { ok: false, error: { code: "SYNC:CHANGE_REJECTED", message: "Invalid change payload" } });
+              return json(res, 400, { ok: false, error: syncError("SYNC:CHANGE_REJECTED", "Invalid change payload", { path: basePath }) });
             }
             const affected = new Set<string>(); changes.forEach((c: any) => affected.add(c.model));
             try {
               applyBatch(tenantId, changes);
             } catch (e) {
-              return json(res, 500, { ok: false, error: { code: "SYNC:SERVER_ERROR", message: "Failed to apply changes" } });
+              return json(res, 500, { ok: false, error: syncError("SYNC:SERVER_ERROR", "Failed to apply changes", { path: basePath }) });
             }
             for (const m of affected) broadcastPoke(m);
             return json(res, 200, { ok: true, value: { applied: true, cursor: nextCursor(tenantId) } });
