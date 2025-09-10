@@ -39,6 +39,14 @@ export interface Change {
 export interface SyncClientMetrics {
   on(event: "connect" | "applyQueued" | "applySent" | "applyAck" | "poke" | "pull", data?: any): void;
 }
+/** High-level connection status emitted by the client. */
+export type SyncClientStatus =
+  | { state: "idle" }
+  | { state: "connecting" }
+  | { state: "connected-ws" }
+  | { state: "connected-http" }
+  | { state: "backoff"; attempt: number; nextMs: number }
+  | { state: "stopped" };
 /** Configuration for createClient. Strongly typed by your schema. */
 export interface SyncClientConfig<TSchema extends SchemaModels = SchemaModels> {
   /** Server origin, e.g. http://localhost:3000 */
@@ -70,6 +78,10 @@ export interface SyncClientConfig<TSchema extends SchemaModels = SchemaModels> {
 export interface SyncClient<TSchema extends SchemaModels = SchemaModels> {
   /** Start background WS-first connection with HTTP fallback and heartbeats. */
   connect(): Promise<void>;
+  /** Subscribe to connection status changes. */
+  onStatus(cb: (s: SyncClientStatus) => void): { unsubscribe(): void };
+  /** Get current connection status snapshot. */
+  getStatus(): SyncClientStatus;
   /** Enqueue a single change for a model. Typed by schema. */
   applyChange<TModel extends ModelName<TSchema>>(model: TModel, change: { type: "insert" | "update" | "delete"; id: string; value?: RowOf<TSchema, TModel>; patch?: Partial<RowOf<TSchema, TModel>> }): Promise<Result<{ queued: boolean }>>;
   /** Enqueue a batch of changes for a model. */

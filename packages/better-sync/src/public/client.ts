@@ -31,6 +31,11 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
   const compressMinBytes = _config.compressMinBytes ?? 8_192; // 8KB
   let inFlight = 0;
   let stopped = false;
+  let status: import("./types.js").SyncClientStatus = { state: "idle" };
+  const statusSubscribers = new Set<(s: import("./types.js").SyncClientStatus) => void>();
+  function setStatus(s: import("./types.js").SyncClientStatus) {
+    status = s; for (const cb of Array.from(statusSubscribers)) { try { cb(s); } catch {} }
+  }
   function approxSize(obj: unknown): number {
     try { return Buffer.byteLength(JSON.stringify(obj), "utf8"); } catch { return 0; }
   }
@@ -90,6 +95,7 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
         if (stopped) return;
         let attempt = 0;
         let ws: WebSocket | null = null;
+        setStatus({ state: "connecting" });
         const refreshModel = async (model: string) => {
           try {
             const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent(model)}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined }); metrics?.on("pull");
@@ -110,8 +116,8 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
             await new Promise<void>((resolve, reject) => {
               try {
                 ws = new WebSocket(`${baseUrl.replace(/^http/, "ws")}${basePath}/ws`);
-                ws.onopen = () => { isConnected = true; resolve(); };
-                ws.onerror = () => { isConnected = false; ws = null; reject(new Error("ws error")); };
+                ws.onopen = () => { isConnected = true; setStatus({ state: "connected-ws" }); resolve(); };
+                ws.onerror = () => { isConnected = false; ws = null; };
                 ws.onclose = () => { isConnected = false; };
                 ws.onmessage = (ev) => {
                   try {
@@ -132,13 +138,13 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
             // fallback to HTTP probe
             try {
               const res = await fetch(`${baseUrl}${basePath}/sync.json`, { method: "GET" });
-              if (res.ok) { isConnected = true; }
+              if (res.ok) { isConnected = true; setStatus({ state: "connected-http" }); }
               else throw new Error("http probe failed");
             } catch {
               isConnected = false;
               const base = Math.min(backoffMax, backoffBase * 2 ** attempt);
               const jitter = Math.floor(Math.random() * 100);
-              await sleep(base + jitter);
+              const nextMs = base + jitter; setStatus({ state: "backoff", attempt, nextMs }); await sleep(nextMs);
               attempt += 1;
               continue;
             }
@@ -147,6 +153,8 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
         }
       })();
     },
+    onStatus(cb: (s: import("./types.js").SyncClientStatus) => void) { statusSubscribers.add(cb); return { unsubscribe() { statusSubscribers.delete(cb); } }; },
+    getStatus() { return status; },
     async applyChange<TModel extends ModelName<TSchema>>(model: TModel, change: { type: "insert" | "update" | "delete"; id: string; value?: RowOf<TSchema, TModel>; patch?: Partial<RowOf<TSchema, TModel>> }) {
       if (queue.length >= queueMaxSize) return { ok: false as const, error: { code: "SYNC:CHANGE_REJECTED", message: "Queue full", meta: { max: queueMaxSize } } };
       queue.push({ model, change } as unknown as Queued); metrics?.on("applyQueued", { model });
@@ -203,7 +211,7 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
     },
     createSnapshot() { return Promise.resolve(); },
     /** Stop background loops and close network resources. */
-    async stop() { stopped = true; },
+    async stop() { stopped = true; setStatus({ state: "stopped" }); },
     /**
      * Return a tenant-scoped client instance.
      * @example
