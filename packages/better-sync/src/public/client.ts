@@ -36,6 +36,7 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
   const statusSubscribers = new Set<(s: SyncClientStatus) => void>();
   function setStatus(s: SyncClientStatus) {
     status = s; for (const cb of Array.from(statusSubscribers)) { try { cb(s); } catch {} }
+    metrics?.on("status", s as any);
   }
   function approxSize(obj: unknown): number {
     try { return Buffer.byteLength(JSON.stringify(obj), "utf8"); } catch { return 0; }
@@ -99,7 +100,7 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
         setStatus({ state: "connecting" });
         const refreshModel = async (model: string) => {
           try {
-            const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent(model)}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined }); metrics?.on("pull");
+            const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent(model)}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined }); metrics?.on("pull", { model });
             if (res.ok) {
               const data = await res.json();
               const set = wsSubscribers.get(model);

@@ -38,8 +38,19 @@ export interface Change {
 }
 
 /** Optional metrics/events hook fired by the client to aid observability. */
+export type SyncClientMetricEvents = {
+  connect: { transport: "ws" | "http" };
+  applyQueued: { model: string };
+  applySent: { count: number; model: string };
+  applyAck: { count: number; model: string };
+  poke: { model?: string };
+  pull: { model?: string };
+  backoff: { attempt: number; nextMs: number };
+  status: SyncClientStatus;
+  retry?: { count: number; model?: string };
+};
 export interface SyncClientMetrics {
-  on(event: "connect" | "applyQueued" | "applySent" | "applyAck" | "poke" | "pull" | "backoff", data?: any): void;
+  on<E extends keyof SyncClientMetricEvents>(event: E, data: SyncClientMetricEvents[E]): void;
 }
 /** High-level connection status emitted by the client. */
 export type SyncClientStatus =
