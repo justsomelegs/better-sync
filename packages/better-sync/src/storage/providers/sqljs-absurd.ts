@@ -3,9 +3,44 @@ import initSqlJs from "@jlongster/sql.js";
 import { SQLiteFS } from "absurd-sql";
 import IndexedDBBackend from "absurd-sql/dist/indexeddb-backend.js";
 
-export interface AbsurdOptions { dbName: string }
+export interface AbsurdOptions { dbName: string; useWorker?: "auto" | "always" | "never" }
 
 export function absurd(options: AbsurdOptions) {
+  const useWorker = options.useWorker ?? "auto";
+  const canUseWorker = typeof Worker !== "undefined" && typeof window !== "undefined";
+  const shouldUseWorker = useWorker === "always" || (useWorker === "auto" && canUseWorker);
+  if (shouldUseWorker) {
+    const workerUrl = new URL("./workers/absurd.worker.js", import.meta.url);
+    const w = new Worker(workerUrl, { type: "module" });
+    let nextId = 1;
+    const pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
+    w.onmessage = (ev: MessageEvent) => {
+      const msg = ev.data || {};
+      if (msg && typeof msg.id === "number") {
+        const entry = pending.get(msg.id);
+        if (entry) {
+          pending.delete(msg.id);
+          if (msg.error) entry.reject(new Error(msg.error)); else entry.resolve(msg.result);
+        }
+      }
+    };
+    // init
+    w.postMessage({ id: 0, method: "init", args: [{ dbName: options.dbName }] });
+    const call = (method: string, ...args: any[]) => new Promise((resolve, reject) => {
+      const id = nextId++;
+      pending.set(id, { resolve, reject });
+      w.postMessage({ id, method, args });
+    });
+    return {
+      kind: "absurd" as const,
+      options,
+      put(store: string, key: string, value: any) { return call("put", store, key, value) as Promise<void>; },
+      get<T>(store: string, key: string) { return call("get", store, key) as Promise<T | undefined>; },
+      del(store: string, key: string) { return call("del", store, key) as Promise<void>; },
+      list<T>(store: string, opts?: { prefix?: string; limit?: number }) { return call("list", store, opts) as Promise<Array<{ key: string; value: T }>>; },
+      clear(store: string) { return call("clear", store) as Promise<void>; },
+    };
+  }
   const require = createRequire(import.meta.url);
   const wasmPath = require.resolve("sql.js/dist/sql-wasm.wasm");
   const dbPromise = (async () => {
