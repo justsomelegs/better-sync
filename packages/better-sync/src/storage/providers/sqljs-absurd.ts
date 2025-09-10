@@ -1,27 +1,57 @@
+import { createRequire } from "node:module";
+import initSqlJs from "sql.js";
+
 export interface AbsurdOptions { dbName: string }
 
 export function absurd(options: AbsurdOptions) {
-  // Minimal facade matching ClientStorage; uses in-memory map in Node tests.
-  const mem = new Map<string, any>();
-  const keyOf = (store: string, key: string) => `${options.dbName}:${store}:${key}`;
+  const require = createRequire(import.meta.url);
+  const wasmPath = require.resolve("sql.js/dist/sql-wasm.wasm");
+  const dbPromise = (async () => {
+    const SQL = await initSqlJs({ locateFile: () => wasmPath });
+    const db = new SQL.Database();
+    db.exec("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;");
+    db.exec("CREATE TABLE IF NOT EXISTS kv (store TEXT, key TEXT, value TEXT, PRIMARY KEY(store, key));");
+    return db;
+  })();
   return {
     kind: "absurd" as const,
     options,
-    async put(store: string, key: string, value: any) { mem.set(keyOf(store, key), value); },
-    async get<T>(store: string, key: string): Promise<T | undefined> { return mem.get(keyOf(store, key)); },
-    async del(store: string, key: string) { mem.delete(keyOf(store, key)); },
+    async put(store: string, key: string, value: any) {
+      const db = await dbPromise;
+      const json = JSON.stringify(value);
+      db.run("INSERT OR REPLACE INTO kv (store, key, value) VALUES (?, ?, ?)", [store, key, json]);
+    },
+    async get<T>(store: string, key: string): Promise<T | undefined> {
+      const db = await dbPromise;
+      const stmt = db.prepare("SELECT value FROM kv WHERE store = ? AND key = ? LIMIT 1");
+      try {
+        const out: T | undefined = stmt.bind([store, key]) && stmt.step() ? JSON.parse(String(stmt.get()[0])) : undefined;
+        return out;
+      } finally { stmt.free(); }
+    },
+    async del(store: string, key: string) {
+      const db = await dbPromise;
+      db.run("DELETE FROM kv WHERE store = ? AND key = ?", [store, key]);
+    },
     async list<T>(store: string, opts?: { prefix?: string; limit?: number }) {
-      const out: Array<{ key: string; value: T }> = [];
-      const prefix = `${options.dbName}:${store}:${opts?.prefix ?? ""}`;
-      for (const [k, v] of mem) {
-        if (k.startsWith(prefix)) out.push({ key: k.slice(prefix.length), value: v });
-        if (opts?.limit && out.length >= opts.limit) break;
-      }
-      return out;
+      const db = await dbPromise;
+      const prefix = String(opts?.prefix ?? "");
+      const limit = opts?.limit ?? -1;
+      const stmt = db.prepare("SELECT key, value FROM kv WHERE store = ? AND key LIKE ? || '%' " + (limit > 0 ? "LIMIT ?" : ""));
+      try {
+        const params: any[] = [store, prefix]; if (limit > 0) params.push(limit);
+        stmt.bind(params);
+        const out: Array<{ key: string; value: T }> = [];
+        while (stmt.step()) {
+          const row = stmt.get();
+          out.push({ key: String(row[0]), value: JSON.parse(String(row[1])) });
+        }
+        return out;
+      } finally { stmt.free(); }
     },
     async clear(store: string) {
-      const prefix = `${options.dbName}:${store}:`;
-      for (const k of Array.from(mem.keys())) if (k.startsWith(prefix)) mem.delete(k);
+      const db = await dbPromise;
+      db.run("DELETE FROM kv WHERE store = ?", [store]);
     },
   };
 }

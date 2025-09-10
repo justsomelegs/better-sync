@@ -33,5 +33,8 @@
     "test": "vitest --run",
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "sql.js": "^1.10.2"
   }
 }
