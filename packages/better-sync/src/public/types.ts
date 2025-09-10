@@ -59,6 +59,8 @@ export interface SyncClientConfig<TSchema extends SchemaModels = SchemaModels> {
   tenantId?: string;
   /** Optional metrics hook for debugging/telemetry. */
   metrics?: SyncClientMetrics;
+  /** Optional client storage provider used for snapshots/queue persistence. */
+  storage?: ClientStorage;
   /** Optional per-model serializers to convert non-JSON types (e.g. bigint/Date) to wire-safe strings. */
   serializers?: Partial<{ [K in ModelName<TSchema>]: import("../internal/serializer.js").ModelSerializer<any, RowOf<TSchema, K>> }>;
   /** Client backoff base (ms). Default 250. */
@@ -137,3 +139,12 @@ export interface SyncServer {
 
 /** Cursor is an opaque token; compare using string equality, do not parse. */
 export type Cursor = string & { readonly __opaque: unique symbol };
+
+/** Minimal client storage interface used by the client for snapshots/persistence. */
+export interface ClientStorage {
+  put<T>(store: string, key: string, value: T): Promise<void>;
+  get<T>(store: string, key: string): Promise<T | undefined>;
+  del(store: string, key: string): Promise<void>;
+  list<T>(store: string, opts?: { prefix?: string; limit?: number }): Promise<Array<{ key: string; value: T }>>;
+  clear(store: string): Promise<void>;
+}

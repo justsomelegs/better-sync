@@ -22,6 +22,7 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
   const metrics = _config.metrics;
   const wsSubscribers = new Map<string, Set<(rows: any[]) => void>>();
   const serializers = (_config.serializers ?? {}) as SyncClientConfig<TSchema>["serializers"];
+  const storage = _config.storage;
   const backoffBase = _config.backoffBaseMs ?? 250;
   const backoffMax = _config.backoffMaxMs ?? 30_000;
   const heartbeatMs = _config.heartbeatMs ?? 30_000;
@@ -227,7 +228,13 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
       void refresh();
       return { unpin() { unpinned = true; } };
     },
-    createSnapshot() { return Promise.resolve(); },
+    async createSnapshot(model?: string) {
+      if (!storage) return;
+      const stamp = Date.now();
+      // naive snapshot: store a cursor marker per model
+      const key = model ? `snapshot:${model}:${stamp}` : `snapshot:all:${stamp}`;
+      await storage.put("snapshots", key, { createdAt: stamp });
+    },
     /** Stop background loops and close network resources. */
     async stop() { stopped = true; setStatus({ state: "stopped" }); },
     /**
