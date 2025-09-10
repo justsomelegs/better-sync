@@ -26,30 +26,58 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
   const backoffMax = _config.backoffMaxMs ?? 30_000;
   const heartbeatMs = _config.heartbeatMs ?? 30_000;
   const queueMaxSize = _config.queueMaxSize ?? Number.POSITIVE_INFINITY;
+  const batchMaxCount = _config.batchMaxCount ?? 1000;
+  const batchMaxBytes = _config.batchMaxBytes ?? 262_144; // ~256KB
+  const compressMinBytes = _config.compressMinBytes ?? 8_192; // 8KB
+  let inFlight = 0;
   let stopped = false;
-  // background sender loop
+  function approxSize(obj: unknown): number {
+    try { return Buffer.byteLength(JSON.stringify(obj), "utf8"); } catch { return 0; }
+  }
+  function encodeValue(model: string, value: any) {
+    const ser = (serializers as any)[model];
+    return ser ? ser.encode(value) : value;
+  }
+  // background sender loop with batching
   (async () => {
     for (; ;) {
       if (stopped) return;
       if (isConnected && queue.length > 0) {
-        const next = queue[0];
+        // Build a batch under limits
+        const firstModel = queue[0]!.model as string;
+        const batch: Array<{ model: string; type: string; id: string; value?: any; patch?: any }> = [];
+        let bytes = 0;
+        while (batch.length < batchMaxCount && queue.length > 0) {
+          const peek = queue[0]!;
+          // keep models in same batch for simplicity; could mix later
+          if (peek.model !== (firstModel as any) && batch.length > 0) break;
+          const payload = { model: String(peek.model), ...peek.change } as any;
+          // apply encode for value
+          if (payload.value !== undefined) payload.value = encodeValue(String(peek.model), payload.value);
+          const nextBytes = approxSize(payload);
+          if (batch.length > 0 && bytes + nextBytes > batchMaxBytes) break;
+          batch.push(payload);
+          bytes += nextBytes;
+          queue.shift();
+        }
         try {
-          metrics?.on("applySent", { model: next.model }); const res = await fetch(`${baseUrl}${basePath}/apply`, {
+          inFlight += 1;
+          metrics?.on("applySent", { count: batch.length, model: firstModel });
+          const body = batch.length === 1
+            ? { model: batch[0]!.model, change: { type: batch[0]!.type, id: batch[0]!.id, value: batch[0]!.value, patch: batch[0]!.patch } }
+            : { changes: batch };
+          const res = await fetch(`${baseUrl}${basePath}/apply`, {
             method: "POST",
             headers: { "Content-Type": "application/json", ...(tenantId ? { "x-tenant-id": tenantId } : {}) },
-            body: JSON.stringify({
-              model: next.model, change: {
-                ...next.change,
-                value: next.change.value && (serializers && (serializers as any)[next.model]) ? (serializers as any)[next.model]!.encode(next.change.value) : next.change.value,
-              }
-            }),
+            body: JSON.stringify(body),
           });
-          if (res.ok) {
-            queue.shift(); metrics?.on("applyAck", { model: next.model });
-            continue; // attempt to send next immediately
-          }
-        } catch {
-          // fall through to sleep
+          if (res.ok) { metrics?.on("applyAck", { count: batch.length, model: firstModel }); inFlight -= 1; continue; }
+        } catch { /* network error -> fallthrough */ }
+        finally { if (inFlight > 0) inFlight -= 1; }
+        // On failure, re-enqueue at front (simple retry); avoid reordering
+        while (batch.length) {
+          const item = batch.pop()!;
+          queue.unshift({ model: item.model as any, change: { type: item.type as any, id: item.id, value: item.value, patch: item.patch } } as any);
         }
       }
       await sleep(25);
@@ -133,13 +161,17 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
       return { ok: true, value: { queued: !isConnected } } as const;
     },
     async drain() {
-      while (queue.length > 0 && !stopped) {
+      while ((queue.length > 0 || inFlight > 0) && !stopped) {
         await sleep(10);
       }
       if (stopped && queue.length > 0) queue.length = 0;
     },
-    getQueueStats() { return { size: queue.length, pendingBatches: queue.length ? 1 : 0, bytes: 0 }; },
-    shouldBackOff() { return queue.length > 1000; },
+    getQueueStats() {
+      // rough estimate: assume ~150 bytes per change when small
+      const bytes = queue.slice(0, Math.min(queue.length, 64)).reduce((n, q) => n + approxSize(q), 0);
+      return { size: queue.length, pendingBatches: Math.ceil(queue.length / batchMaxCount), bytes };
+    },
+    shouldBackOff() { return queue.length >= Math.min(queueMaxSize, batchMaxCount * 4); },
     /**
      * Subscribe to a model. Immediately pulls current rows, then refreshes
      * whenever the server sends a WS "poke".

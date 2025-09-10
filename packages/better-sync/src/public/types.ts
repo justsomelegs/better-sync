@@ -59,6 +59,12 @@ export interface SyncClientConfig<TSchema extends SchemaModels = SchemaModels> {
   heartbeatMs?: number;
   /** Max in-memory queue size before rejecting new changes. Default Infinity. */
   queueMaxSize?: number;
+  /** Max number of changes per batch. Default 1000. */
+  batchMaxCount?: number;
+  /** Approximate max JSON bytes per batch before flushing. Default 262144 (256KB). */
+  batchMaxBytes?: number;
+  /** Compress payloads larger than this many bytes (noop placeholder). Default 8192 (8KB). */
+  compressMinBytes?: number;
 }
 /** Strongly-typed client constructed by createClient<typeof schema>(). */
 export interface SyncClient<TSchema extends SchemaModels = SchemaModels> {
