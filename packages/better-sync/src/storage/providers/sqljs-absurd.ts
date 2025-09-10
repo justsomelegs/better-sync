@@ -1,5 +1,7 @@
 import { createRequire } from "node:module";
-import initSqlJs from "sql.js";
+import initSqlJs from "@jlongster/sql.js";
+import { SQLiteFS } from "absurd-sql";
+import IndexedDBBackend from "absurd-sql/dist/indexeddb-backend.js";
 
 export interface AbsurdOptions { dbName: string }
 
@@ -8,7 +10,18 @@ export function absurd(options: AbsurdOptions) {
   const wasmPath = require.resolve("sql.js/dist/sql-wasm.wasm");
   const dbPromise = (async () => {
     const SQL = await initSqlJs({ locateFile: () => wasmPath });
-    const db = new SQL.Database();
+    // Mount absurd-sql FS (IndexedDB-backed) to persist DB in browser
+    const sqlFS = new SQLiteFS(SQL.FS, new IndexedDBBackend());
+    SQL.register_for_idb(sqlFS);
+    SQL.FS.mkdir("/sql");
+    SQL.FS.mount(sqlFS, {}, "/sql");
+    const path = `/sql/${options.dbName}.sqlite`;
+    if (typeof (globalThis as any).SharedArrayBuffer === "undefined") {
+      const stream = SQL.FS.open(path, "a+");
+      await (stream as any).node.contents.readIfFallback?.();
+      SQL.FS.close(stream);
+    }
+    const db = new SQL.Database(path, { filename: true });
     db.exec("PRAGMA journal_mode=MEMORY; PRAGMA synchronous=OFF;");
     db.exec("CREATE TABLE IF NOT EXISTS kv (store TEXT, key TEXT, value TEXT, PRIMARY KEY(store, key));");
     return db;
