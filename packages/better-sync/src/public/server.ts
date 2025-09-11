@@ -19,10 +19,20 @@ import { getSyncJsonMeta } from "./sync-json.js";
  * app.listen(3000);
  */
 /**
- * Build a Better Sync server instance.
- * - HTTP endpoints: GET /sync.json, GET /pull?model=..., POST /apply
- * - Optional WebSocket: attach via attachWebSocket(server) and clients will be poked after apply
- * - Guards: authorize/forbid/shouldRateLimit → mapped to SYNC:* error codes
+ * Creates an in-memory, per-tenant sync server with HTTP endpoints, optional WebSocket support, and a programmatic API.
+ *
+ * The returned server exposes:
+ * - fetch(): an Express-style HTTP handler serving GET /sync.json, GET /pull, POST /apply, and POST /shapes/register.
+ * - attachWebSocket(server): attaches a WebSocket server (clients connect to `${basePath}/ws`) used to broadcast poke notifications after changes.
+ * - api: a programmatic API with apply(), withTenant(), and registerShape().
+ *
+ * Behavior highlights:
+ * - Per-tenant in-memory stores for data, clocks (HLC-style), cursors, and registered shapes.
+ * - apply semantics include coalescing multiple changes per (model,id), last-writer-wins using clocks (timestamp then actorId), and delete-wins on ties.
+ * - Pull supports optional shape filtering/selection and per-shape cursors for incremental pulls.
+ * - Supports idempotent applies via `x-idempotency-key` (or body.idempotencyKey).
+ *
+ * @returns The SyncServer instance.
  */
 export function betterSync(_config: SyncServerConfig): SyncServer {
   const basePath = _config.basePath ?? "/api/sync";

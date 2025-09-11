@@ -5,6 +5,25 @@ import IndexedDBBackend from "absurd-sql/dist/indexeddb-backend.js";
 
 export interface AbsurdOptions { dbName: string; useWorker?: "auto" | "always" | "never" }
 
+/**
+ * Creates an "absurd" key-value storage adapter backed by SQLite (sql.js + Absurd-SQL), optionally running in a Web Worker.
+ *
+ * Depending on options.useWorker and runtime capabilities, this returns an API that either proxies operations to a worker (RPC over postMessage) or uses an in-thread sql.js database persisted via an IndexedDB-backed filesystem.
+ *
+ * Behavior notes:
+ * - Options.useWorker: "always" forces worker mode, "never" forces in-thread mode, "auto" uses a worker when the environment supports Worker and window.
+ * - Data is persisted as JSON strings in a single table `kv(store TEXT, key TEXT, value TEXT, PRIMARY KEY(store, key))`.
+ * - In worker mode, a worker is spawned from ./workers/absurd.worker.js and calls are proxied; in non-worker mode, sql.js is initialized, an IndexedDB-backed FS is mounted at /sql, and a SQLite file /sql/{dbName}.sqlite is opened.
+ * - Values stored are JSON-serialized on put and JSON-parsed on get/list.
+ *
+ * @param options - Configuration for the adapter (see AbsurdOptions).
+ * @returns An object with kind: "absurd", the supplied options, and async methods:
+ *   - put(store, key, value): Promise<void>
+ *   - get<T>(store, key): Promise<T | undefined>
+ *   - del(store, key): Promise<void>
+ *   - list<T>(store, opts?): Promise<Array<{ key: string; value: T }>>
+ *   - clear(store): Promise<void>
+ */
 export function absurd(options: AbsurdOptions) {
   const useWorker = options.useWorker ?? "auto";
   const canUseWorker = typeof Worker !== "undefined" && typeof window !== "undefined";

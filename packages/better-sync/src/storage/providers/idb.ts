@@ -10,6 +10,22 @@ export interface IdbHandle {
   clear(store: string): Promise<void>;
 }
 
+/**
+ * Creates an IdbHandle storage facade namespaced by the given database name.
+ *
+ * The returned handle implements an in-memory Map-backed key/value store (used for Node/tests)
+ * and is designed to mirror an IndexedDB-backed implementation for browsers. Keys are stored
+ * under a composite form `${dbName}:${store}:${key}`.
+ *
+ * @param options - Configuration for the handle. `options.dbName` is used to namespace all keys.
+ * @returns An IdbHandle exposing async methods: `put`, `get`, `del`, `list`, and `clear`.
+ *
+ * Notes:
+ * - `list(store, { prefix?, limit? })` returns entries whose composite keys start with
+ *   `${dbName}:${store}:${prefix ?? ""}` and strips that prefix from the returned `key` fields.
+ * - `clear(store)` deletes entries whose composite keys start with `${dbName}:${store}:\n`
+ *   (the implementation includes a trailing newline in that prefix).
+ */
 export function idb(options: IdbOptions): IdbHandle {
   // In tests/Node we fallback to an in-memory map; in browsers use IndexedDB
   const mem = new Map<string, any>();
