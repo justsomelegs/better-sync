@@ -124,12 +124,12 @@ export const client = createClient<typeof schema>({
 const one = await client.todos.select('t1', { select: ['id','title','done'] });
 
 // By query (predicate is type-safe; evaluated client-side in MVP)
-const list = await client.todos.select({
+const { data, nextCursor } = await client.todos.select({
   where: ({ done, title }) => !done && title.includes('milk'),
   select: ['id','title','updatedAt'],
   orderBy: { updatedAt: 'desc' },
   limit: 50,
-  offset: 0
+  cursor: undefined // opaque token; pass previous nextCursor for next page
 });
 ```
 
@@ -152,8 +152,7 @@ const sub2 = client.todos.watch(
     where: ({ done }) => !done,
     select: ['id','title'],
     orderBy: { updatedAt: 'desc' },
-    limit: 50,
-    offset: 0
+    limit: 50
   },
   ({ data, changes, cursor }) => {
     // data: Todo[]
