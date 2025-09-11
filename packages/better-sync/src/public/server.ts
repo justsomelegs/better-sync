@@ -65,6 +65,11 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
   // Shapes: tenant -> shapeId -> def
   const shapes = new Map<string, Map<string, { model: string; where?: Record<string, unknown>; select?: string[] }>>();
   const shapeIds = new Map<string, number>(); // tenant-local counters
+  const shapeCursors = new Map<string, Map<string, number>>(); // tenant -> shapeId -> cursor
+  const getShapeCursor = (tenantId: string, shapeId: string) => {
+    let t = shapeCursors.get(tenantId); if (!t) { t = new Map(); shapeCursors.set(tenantId, t); }
+    return t;
+  };
   const broadcastPoke = (model?: string) => {
     for (const s of sockets) {
       try { s.send(JSON.stringify({ type: "poke", model })); } catch {}
@@ -112,7 +117,9 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
       if (aa < ba) return -1;
       return 0;
     };
+    const affectedModels = new Set<string>();
     for (const [model, idMap] of finalByModelId) {
+      affectedModels.add(model);
       const rows = getModelMap(tenantId, model);
       const cm = getClockMap(tenantId, model);
       for (const [id, fin] of idMap) {
@@ -128,6 +135,16 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
           const nextValue = { ...base, ...(fin.patch ?? {}) };
           rows.set(id, nextValue);
           if (fin.clock) cm.set(id, fin.clock);
+        }
+      }
+    }
+    // bump per-shape cursors for affected models
+    const tShapes = shapes.get(tenantId);
+    if (tShapes && tShapes.size) {
+      for (const [sid, def] of tShapes) {
+        if (affectedModels.has(def.model)) {
+          const tm = getShapeCursor(tenantId, sid);
+          const cur = (tm.get(sid) ?? 0) + 1; tm.set(sid, cur);
         }
       }
     }
@@ -218,7 +235,7 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
                 }
               }
             }
-            const cursor = String(tenantCursor.get(tenantId) ?? 0);
+            const cursor = shapeId ? String(getShapeCursor(tenantId, shapeId).get(shapeId) ?? 0) : String(tenantCursor.get(tenantId) ?? 0);
             if (since && since === cursor) return json(res, 200, { ok: true, value: { rows: [], cursor } });
             return json(res, 200, { ok: true, value: { rows, cursor } });
           }
@@ -249,6 +266,18 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
             }
             for (const m of affected) broadcastPoke(m);
             return json(res, 200, { ok: true, value: { applied: true, cursor: nextCursor(tenantId) } });
+          }
+          if (method === "POST" && (remainder === "/shapes/register" || remainder === "/shapes/register/")) {
+            const body = await parseBody(req);
+            const tenantId = getTenant(req);
+            if (!body?.model) return json(res, 400, { ok: false, error: syncError("SYNC:CHANGE_REJECTED", "Missing model", { path: basePath }) });
+            const tid = shapeIds.get(tenantId) ?? 0; const idNum = tid + 1; shapeIds.set(tenantId, idNum);
+            let t = shapes.get(tenantId); if (!t) { t = new Map(); shapes.set(tenantId, t); }
+            const id = `shape_${idNum}`;
+            t.set(id, { model: body.model, where: body.where, select: body.select });
+            // initialize shape cursor to current tenant cursor
+            const tm = getShapeCursor(tenantId, id); tm.set(id, tenantCursor.get(tenantId) ?? 0);
+            return json(res, 200, { ok: true, value: { id } });
           }
         }
         if (typeof next === "function") return next();
