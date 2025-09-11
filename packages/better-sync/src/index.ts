@@ -5,7 +5,7 @@
  * const sync = createClient({ baseUrl: "http://localhost:3000" });
  */
 export { createClient, createSyncClient } from "./public/client.js";
-export { betterSync } from "./public/server.js";
+export { betterSync, createSyncServer } from "./public/server.js";
 export * from "./public/types.js";
 /**
  * Helper to define a typed schema mapping model names to row types.

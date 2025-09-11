@@ -58,3 +58,27 @@ export function compose<TRow>(
     decode(wire: any) { return list.reduceRight((acc, s) => s.decode(acc), wire); },
   } as const;
 }
+
+/**
+ * @example
+ * // Prisma Decimal + Date wiring
+ * import { Prisma } from "@prisma/client";
+ * type Invoice = { id: string; amount: any; issuedAt: Date };
+ * const s = compose<Invoice>(
+ *   {
+ *     encode: (r) => ({ ...r, amount: String(r.amount) }),
+ *     decode: (w) => ({ ...w, amount: new Prisma.Decimal(w.amount) }),
+ *   },
+ *   dateFields<Invoice>("issuedAt"),
+ * );
+ */
+
+/** Adapter/default normalization helpers */
+export const defaults = {
+  uuidToString<TRow extends Record<string, any>, K extends ReadonlyArray<keyof TRow>>(..._keys: K): ModelSerializer<TRow, TRow> {
+    return { encode: (r: any) => r, decode: (w: any) => w } as any;
+  },
+  numericToString<TRow extends Record<string, any>, K extends ReadonlyArray<keyof TRow>>(..._keys: K): ModelSerializer<TRow, TRow> {
+    return { encode: (r: any) => r, decode: (w: any) => w } as any;
+  },
+};

@@ -21,7 +21,16 @@ export type ModelName<TSchema extends SchemaModels> = Extract<keyof TSchema, str
 /** Row type for a given model name in a schema. */
 export type RowOf<TSchema extends SchemaModels, TModel extends ModelName<TSchema>> = TSchema[TModel];
 
-/** Generic change shape used by client/server sync flows. */
+/**
+ * Generic change shape used by client/server sync flows.
+ *
+ * Concepts:
+ * - Changes are idempotent and safe to retry.
+ * - Conflict resolution is Last-Write-Wins using a Hybrid Logical Clock (HLC):
+ *   the optional {@link clock} carries a timestamp and actorId. Newer timestamps
+ *   win; on ties, a delete beats an update (delete-wins), then actorId breaks ties
+ *   lexicographically. This ensures deterministic convergence across devices.
+ */
 export interface Change {
   /** Target model name. */
   model: string;
@@ -33,13 +42,56 @@ export interface Change {
   value?: any;
   /** Partial update shape for updates. */
   patch?: Record<string, unknown>;
+  /** Optional conflict clock: last-write-wins by ts; actorId tie-breaker. */
+  clock?: { ts?: number | string; actorId?: string };
 }
 
 /** Optional metrics/events hook fired by the client to aid observability. */
+/**
+ * Typed client metrics events.
+ *
+ * Concepts:
+ * - connect: transport used (ws/http fallback)
+ * - applyQueued/applySent/applyAck: queue lifecycle of outgoing changes
+ * - poke: server notification to refresh a subscription
+ * - pull: explicit model pull (often following a poke)
+ * - backoff: reconnect strategy using exponential backoff with jitter
+ * - status: connection state machine snapshot
+ */
+export type SyncClientMetricEvents = {
+  connect: { transport: "ws" | "http" };
+  applyQueued: { model: string };
+  applySent: { count: number; model: string };
+  applyAck: { count: number; model: string };
+  poke: { model?: string };
+  pull: { model?: string };
+  backoff: { attempt: number; nextMs: number };
+  status: SyncClientStatus;
+  retry?: { count: number; model?: string };
+};
 export interface SyncClientMetrics {
-  on(event: "connect" | "applyQueued" | "applySent" | "applyAck" | "poke" | "pull", data?: any): void;
+  on<E extends keyof SyncClientMetricEvents>(event: E, data: SyncClientMetricEvents[E]): void;
 }
+/** High-level connection status emitted by the client. */
+export type SyncClientStatus =
+  | { state: "idle" }
+  | { state: "connecting" }
+  | { state: "connected-ws" }
+  | { state: "connected-http" }
+  | { state: "backoff"; attempt: number; nextMs: number }
+  | { state: "stopped" };
 /** Configuration for createClient. Strongly typed by your schema. */
+/**
+ * Client configuration.
+ *
+ * Concepts:
+ * - baseUrl/basePath: server address and sync endpoint mount path
+ * - storage: optional client storage for snapshots/queue persistence; can be backed by
+ *   IndexedDB or absurd-sql and should run in a Worker to avoid blocking the UI thread
+ * - serializers: per-model encode/decode for non-JSON-safe primitives (bigint, Date, etc.)
+ * - backoff/heartbeat: connectivity tuning
+ * - batching: count/bytes thresholds and compression gate
+ */
 export interface SyncClientConfig<TSchema extends SchemaModels = SchemaModels> {
   /** Server origin, e.g. http://localhost:3000 */
   baseUrl: string;
@@ -49,6 +101,8 @@ export interface SyncClientConfig<TSchema extends SchemaModels = SchemaModels> {
   tenantId?: string;
   /** Optional metrics hook for debugging/telemetry. */
   metrics?: SyncClientMetrics;
+  /** Optional client storage provider used for snapshots/queue persistence. */
+  storage?: ClientStorage;
   /** Optional per-model serializers to convert non-JSON types (e.g. bigint/Date) to wire-safe strings. */
   serializers?: Partial<{ [K in ModelName<TSchema>]: import("../internal/serializer.js").ModelSerializer<any, RowOf<TSchema, K>> }>;
   /** Client backoff base (ms). Default 250. */
@@ -59,11 +113,21 @@ export interface SyncClientConfig<TSchema extends SchemaModels = SchemaModels> {
   heartbeatMs?: number;
   /** Max in-memory queue size before rejecting new changes. Default Infinity. */
   queueMaxSize?: number;
+  /** Max number of changes per batch. Default 1000. */
+  batchMaxCount?: number;
+  /** Approximate max JSON bytes per batch before flushing. Default 262144 (256KB). */
+  batchMaxBytes?: number;
+  /** Compress payloads larger than this many bytes (noop placeholder). Default 8192 (8KB). */
+  compressMinBytes?: number;
 }
 /** Strongly-typed client constructed by createClient<typeof schema>(). */
 export interface SyncClient<TSchema extends SchemaModels = SchemaModels> {
   /** Start background WS-first connection with HTTP fallback and heartbeats. */
   connect(): Promise<void>;
+  /** Subscribe to connection status changes. */
+  onStatus(cb: (s: SyncClientStatus) => void): { unsubscribe(): void };
+  /** Get current connection status snapshot. */
+  getStatus(): SyncClientStatus;
   /** Enqueue a single change for a model. Typed by schema. */
   applyChange<TModel extends ModelName<TSchema>>(model: TModel, change: { type: "insert" | "update" | "delete"; id: string; value?: RowOf<TSchema, TModel>; patch?: Partial<RowOf<TSchema, TModel>> }): Promise<Result<{ queued: boolean }>>;
   /** Enqueue a batch of changes for a model. */
@@ -84,6 +148,15 @@ export interface SyncClient<TSchema extends SchemaModels = SchemaModels> {
     params: { model: TModel; where?: Partial<RowOf<TSchema, TModel>>; select?: TKeys },
     cb: (rows: Array<TProjected>) => void
   ): { unsubscribe(): void };
+  /**
+   * Pin a server-managed shape for background refresh (HTTP-fallback aware).
+   *
+   * Shape filtering (partial replication): A shape is a saved rule on the server that
+   * describes a subset (slice) of data to sync, defined by a model, optional where
+   * filters (row predicates) and optional select fields. Shapes reduce bandwidth and
+   * local storage by only syncing the relevant rows/columns.
+   */
+  pinShape(shapeId: string): { unpin(): void };
   /** Create a snapshot of local state (no-op placeholder for future). */
   createSnapshot(model?: string): Promise<void> | void;
   /** Return a tenant-bound client that automatically sends x-tenant-id. */
@@ -102,13 +175,28 @@ export interface SyncServerConfig {
   forbid?: (req: any) => boolean | Promise<boolean>;
   /** Return true to send SYNC:RATE_LIMITED (429). */
   shouldRateLimit?: (req: any) => boolean | Promise<boolean>;
+  /** Optional row-level ACLs. */
+  canRead?: (req: any, model: string, row: any) => boolean | Promise<boolean>;
+  canWrite?: (req: any, model: string, change: Change) => boolean | Promise<boolean>;
 }
 export interface SyncServer {
   attachWebSocket?(server: any): any; // optional WS attach helper
   fetch(): any; // framework handler adapter
   api: {
-    apply(input: { tenantId?: string; changes: Change[] }): Promise<Result<{ applied: boolean; cursor: string }>>;
+    apply(input: { tenantId?: string; changes: Change[] }): Promise<Result<{ applied: boolean; cursor: Cursor }>>;
     withTenant(id?: string): SyncServer["api"];
-    registerShape(input: any): Promise<void> | void;
+    registerShape(input: { tenantId?: string; model: string; where?: Record<string, unknown>; select?: string[] }): Promise<{ id: string }> | { id: string };
   };
+}
+
+/** Cursor is an opaque token; compare using string equality, do not parse. */
+export type Cursor = string & { readonly __opaque: unique symbol };
+
+/** Minimal client storage interface used by the client for snapshots/persistence. */
+export interface ClientStorage {
+  put<T>(store: string, key: string, value: T): Promise<void>;
+  get<T>(store: string, key: string): Promise<T | undefined>;
+  del(store: string, key: string): Promise<void>;
+  list<T>(store: string, opts?: { prefix?: string; limit?: number }): Promise<Array<{ key: string; value: T }>>;
+  clear(store: string): Promise<void>;
 }

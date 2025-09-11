@@ -33,5 +33,10 @@
     "test": "vitest --run",
     "lint": "biome check .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@jlongster/sql.js": "^1.6.7",
+    "absurd-sql": "^0.0.54",
+    "ws": "^8.18.3"
   }
 }
