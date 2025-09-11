@@ -21,7 +21,16 @@ export type ModelName<TSchema extends SchemaModels> = Extract<keyof TSchema, str
 /** Row type for a given model name in a schema. */
 export type RowOf<TSchema extends SchemaModels, TModel extends ModelName<TSchema>> = TSchema[TModel];
 
-/** Generic change shape used by client/server sync flows. */
+/**
+ * Generic change shape used by client/server sync flows.
+ *
+ * Concepts:
+ * - Changes are idempotent and safe to retry.
+ * - Conflict resolution is Last-Write-Wins using a Hybrid Logical Clock (HLC):
+ *   the optional {@link clock} carries a timestamp and actorId. Newer timestamps
+ *   win; on ties, a delete beats an update (delete-wins), then actorId breaks ties
+ *   lexicographically. This ensures deterministic convergence across devices.
+ */
 export interface Change {
   /** Target model name. */
   model: string;
@@ -38,6 +47,17 @@ export interface Change {
 }
 
 /** Optional metrics/events hook fired by the client to aid observability. */
+/**
+ * Typed client metrics events.
+ *
+ * Concepts:
+ * - connect: transport used (ws/http fallback)
+ * - applyQueued/applySent/applyAck: queue lifecycle of outgoing changes
+ * - poke: server notification to refresh a subscription
+ * - pull: explicit model pull (often following a poke)
+ * - backoff: reconnect strategy using exponential backoff with jitter
+ * - status: connection state machine snapshot
+ */
 export type SyncClientMetricEvents = {
   connect: { transport: "ws" | "http" };
   applyQueued: { model: string };
@@ -61,6 +81,17 @@ export type SyncClientStatus =
   | { state: "backoff"; attempt: number; nextMs: number }
   | { state: "stopped" };
 /** Configuration for createClient. Strongly typed by your schema. */
+/**
+ * Client configuration.
+ *
+ * Concepts:
+ * - baseUrl/basePath: server address and sync endpoint mount path
+ * - storage: optional client storage for snapshots/queue persistence; can be backed by
+ *   IndexedDB or absurd-sql and should run in a Worker to avoid blocking the UI thread
+ * - serializers: per-model encode/decode for non-JSON-safe primitives (bigint, Date, etc.)
+ * - backoff/heartbeat: connectivity tuning
+ * - batching: count/bytes thresholds and compression gate
+ */
 export interface SyncClientConfig<TSchema extends SchemaModels = SchemaModels> {
   /** Server origin, e.g. http://localhost:3000 */
   baseUrl: string;
@@ -117,7 +148,14 @@ export interface SyncClient<TSchema extends SchemaModels = SchemaModels> {
     params: { model: TModel; where?: Partial<RowOf<TSchema, TModel>>; select?: TKeys },
     cb: (rows: Array<TProjected>) => void
   ): { unsubscribe(): void };
-  /** Pin a server shape for background refresh (HTTP fallback aware). */
+  /**
+   * Pin a server-managed shape for background refresh (HTTP-fallback aware).
+   *
+   * Shape filtering (partial replication): A shape is a saved rule on the server that
+   * describes a subset (slice) of data to sync, defined by a model, optional where
+   * filters (row predicates) and optional select fields. Shapes reduce bandwidth and
+   * local storage by only syncing the relevant rows/columns.
+   */
   pinShape(shapeId: string): { unpin(): void };
   /** Create a snapshot of local state (no-op placeholder for future). */
   createSnapshot(model?: string): Promise<void> | void;

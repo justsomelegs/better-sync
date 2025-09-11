@@ -75,7 +75,15 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
       try { s.send(JSON.stringify({ type: "poke", model })); } catch {}
     }
   };
-  /** Coalesce and apply a batch of changes; delete-wins, update patches merged. */
+  /**
+   * Coalesce and apply a batch of changes with conflict handling.
+   *
+   * Concepts:
+   * - Coalescing: Multiple updates on the same (model,id) are merged; delete wins.
+   * - HLC LWW: Newer {@link clock} wins; on tie, delete beats update; actorId breaks ties.
+   * - Per-shape cursor: After applying changes, any shapes referencing affected models
+   *   advance their own cursors so clients can pull incrementally by shape.
+   */
   const applyBatch = (tenantId: string, changes: Array<{ model: string; type: string; id: string; value?: any; patch?: Record<string, unknown>; clock?: { ts?: number | string; actorId?: string } }>) => {
     // coalesce per model/id
     const finalByModelId = new Map<string, Map<string, { action: "delete" | "upsert"; base?: any; patch?: Record<string, unknown>; clock?: { ts?: number | string; actorId?: string } }>>();
