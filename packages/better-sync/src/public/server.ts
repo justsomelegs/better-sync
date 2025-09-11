@@ -249,6 +249,7 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
             const changes = Array.isArray(body?.changes)
               ? body.changes
               : body && body.model && body.change ? [{ model: body.model, ...body.change }] : [];
+            const idempotencyKey = String(req?.headers?.["x-idempotency-key"] ?? body?.idempotencyKey ?? "");
             if (!changes.length) {
               return json(res, 400, { ok: false, error: syncError("SYNC:CHANGE_REJECTED", "Invalid change payload", { path: basePath }) });
             }
@@ -258,6 +259,13 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
                 if (!ok) return json(res, 403, { ok: false, error: syncError("SYNC:FORBIDDEN", "Change rejected by ACL", { path: basePath }) });
               }
             }
+            // idempotency cache per tenant
+            const idemKey = `${tenantId}:${idempotencyKey}`;
+            const idem = (globalThis as any).__betterSyncIdem ?? ((globalThis as any).__betterSyncIdem = new Map<string, any>());
+            if (idempotencyKey && idem.has(idemKey)) {
+              const prev = idem.get(idemKey);
+              return json(res, 200, { ok: true, value: prev });
+            }
             const affected = new Set<string>(); changes.forEach((c: any) => affected.add(c.model));
             try {
               applyBatch(tenantId, changes);
@@ -265,7 +273,9 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
               return json(res, 500, { ok: false, error: syncError("SYNC:SERVER_ERROR", "Failed to apply changes", { path: basePath }) });
             }
             for (const m of affected) broadcastPoke(m);
-            return json(res, 200, { ok: true, value: { applied: true, cursor: nextCursor(tenantId) } });
+            const value = { applied: true, cursor: nextCursor(tenantId) } as const;
+            if (idempotencyKey) idem.set(idemKey, value);
+            return json(res, 200, { ok: true, value });
           }
           if (method === "POST" && (remainder === "/shapes/register" || remainder === "/shapes/register/")) {
             const body = await parseBody(req);

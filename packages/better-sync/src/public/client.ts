@@ -13,7 +13,7 @@ function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
  * await sync.drain();
  */
 export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_config: SyncClientConfig<TSchema>): SyncClient<TSchema> {
-  type Queued = { model: ModelName<TSchema>; change: { type: "insert" | "update" | "delete"; id: string; value?: unknown; patch?: any } };
+  type Queued = { model: ModelName<TSchema>; idempotencyKey?: string; change: { type: "insert" | "update" | "delete"; id: string; value?: unknown; patch?: any } };
   const queue: Queued[] = [];
   const basePath = _config.basePath ?? "/api/sync";
   const baseUrl = _config.baseUrl.replace(/\/$/, "");
@@ -54,18 +54,20 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
       if (isConnected && queue.length > 0) {
         // Build a batch under limits
         const firstModel = queue[0]!.model as string;
-        const batch: Array<{ model: string; type: string; id: string; value?: any; patch?: any }> = [];
+        const batch: Array<{ model: string; type: string; id: string; value?: any; patch?: any; idempotencyKey?: string }> = [];
+        const idKeys = new Set<string | undefined>();
         let bytes = 0;
         while (batch.length < batchMaxCount && queue.length > 0) {
           const peek = queue[0]!;
           // keep models in same batch for simplicity; could mix later
           if (peek.model !== (firstModel as any) && batch.length > 0) break;
-          const payload = { model: String(peek.model), ...peek.change } as any;
+          const payload = { model: String(peek.model), ...peek.change, idempotencyKey: peek.idempotencyKey } as any;
           // apply encode for value
           if (payload.value !== undefined) payload.value = encodeValue(String(peek.model), payload.value);
           const nextBytes = approxSize(payload);
           if (batch.length > 0 && bytes + nextBytes > batchMaxBytes) break;
           batch.push(payload);
+          idKeys.add(peek.idempotencyKey);
           bytes += nextBytes;
           queue.shift();
         }
@@ -73,9 +75,10 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
           inFlight += 1;
           metrics?.on("applySent", { count: batch.length, model: firstModel });
           const bodyObj = batch.length === 1
-            ? { model: batch[0]!.model, change: { type: batch[0]!.type, id: batch[0]!.id, value: batch[0]!.value, patch: batch[0]!.patch } }
-            : { changes: batch };
+            ? { model: batch[0]!.model, change: { type: batch[0]!.type, id: batch[0]!.id, value: batch[0]!.value, patch: batch[0]!.patch }, idempotencyKey: batch[0]!.idempotencyKey }
+            : { changes: batch, idempotencyKey: (idKeys.size === 1 ? Array.from(idKeys)[0] : undefined) };
           let headers: Record<string, string> = { ...(tenantId ? { "x-tenant-id": tenantId } : {}) };
+          if ((bodyObj as any).idempotencyKey) headers["x-idempotency-key"] = String((bodyObj as any).idempotencyKey);
           let payload: BodyInit;
           const raw = JSON.stringify(bodyObj);
           if (raw.length >= compressMinBytes && typeof (globalThis as any).CompressionStream !== "undefined") {
@@ -97,7 +100,7 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
         // On failure, re-enqueue at front (simple retry); avoid reordering
         while (batch.length) {
           const item = batch.pop()!;
-          queue.unshift({ model: item.model as any, change: { type: item.type as any, id: item.id, value: item.value, patch: item.patch } } as any);
+          queue.unshift({ model: item.model as any, idempotencyKey: item.idempotencyKey, change: { type: item.type as any, id: item.id, value: item.value, patch: item.patch } } as any);
         }
       }
       await sleep(25);
@@ -179,14 +182,16 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
     getStatus() { return status; },
     async applyChange<TModel extends ModelName<TSchema>>(model: TModel, change: { type: "insert" | "update" | "delete"; id: string; value?: RowOf<TSchema, TModel>; patch?: Partial<RowOf<TSchema, TModel>> }) {
       if (queue.length >= queueMaxSize) return { ok: false as const, error: { code: "SYNC:CHANGE_REJECTED", message: "Queue full", meta: { max: queueMaxSize } } };
-      queue.push({ model, change } as unknown as Queued); metrics?.on("applyQueued", { model });
+      const idk = `ik_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+      queue.push({ model, idempotencyKey: idk, change } as unknown as Queued); metrics?.on("applyQueued", { model });
       return { ok: true, value: { queued: !isConnected } } as const;
     },
     /** Apply a batch of changes; returns when enqueued. */
     async applyChanges<TModel extends ModelName<TSchema>>(model: TModel, changes: { type: "insert" | "update" | "delete"; id: string; value?: RowOf<TSchema, TModel>; patch?: Partial<RowOf<TSchema, TModel>> }[]) {
+      const idk = `ik_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
       for (const c of changes) {
         if (queue.length >= queueMaxSize) return { ok: false as const, error: { code: "SYNC:CHANGE_REJECTED", message: "Queue full", meta: { max: queueMaxSize } } };
-        queue.push({ model, change: c } as unknown as Queued); metrics?.on("applyQueued", { model });
+        queue.push({ model, idempotencyKey: idk, change: c } as unknown as Queued); metrics?.on("applyQueued", { model });
       }
       return { ok: true, value: { queued: !isConnected } } as const;
     },

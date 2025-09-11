@@ -4,13 +4,15 @@ export interface SyncJsonMeta {
   features: string[];
   basePath: string;
   methods: string[];
+  wire?: { encoding: "json" | "msgpack"; compression?: ("gzip" | "brotli")[] };
 }
 
 export function getSyncJsonMeta(basePath: string = "/api/sync"): SyncJsonMeta {
   return {
     protocolVersion: 1,
-    features: ["ws", "http-fallback"],
+    features: ["ws", "http-fallback", "shapes", "since-cursor", "idempotency"],
     basePath,
-    methods: ["apply", "registerShape"],
+    methods: ["apply", "registerShape", "pull"],
+    wire: { encoding: "json", compression: ["gzip"] },
   };
 }
