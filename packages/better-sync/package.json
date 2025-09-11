@@ -36,6 +36,7 @@
   },
   "dependencies": {
     "@jlongster/sql.js": "^1.6.7",
-    "absurd-sql": "^0.0.54"
+    "absurd-sql": "^0.0.54",
+    "ws": "^8.18.3"
   }
 }
