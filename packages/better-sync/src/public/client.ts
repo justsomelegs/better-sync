@@ -1,5 +1,11 @@
 import type { SyncClient, SyncClientConfig, SchemaModels, ModelName, RowOf, SyncClientStatus } from "./types.js";
 
+/**
+ * Returns a promise that resolves after a specified delay.
+ *
+ * @param ms - Delay duration in milliseconds.
+ * @returns A promise that resolves once the delay has elapsed.
+ */
 function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
 /**
  * Create a sync client.
@@ -47,13 +53,36 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
   let stopped = false;
   let status: SyncClientStatus = { state: "idle" };
   const statusSubscribers = new Set<(s: SyncClientStatus) => void>();
+  /**
+   * Update the client's status and notify listeners.
+   *
+   * Sets the internal status to `s`, invokes all registered status subscriber callbacks with the new status
+   * (subscriber errors are caught and ignored), and emits a `"status"` event to the optional metrics sink.
+   *
+   * @param s - The new SyncClientStatus to publish
+   */
   function setStatus(s: SyncClientStatus) {
     status = s; for (const cb of Array.from(statusSubscribers)) { try { cb(s); } catch {} }
     metrics?.on("status", s as any);
   }
+  /**
+   * Returns the approximate UTF-8 byte length of `obj` when JSON-serialized.
+   *
+   * Useful for rough payload sizing estimates. If `obj` cannot be serialized to JSON,
+   * the function returns 0.
+   *
+   * @returns Approximate number of bytes of `JSON.stringify(obj)` encoded as UTF-8, or 0 on serialization error.
+   */
   function approxSize(obj: unknown): number {
     try { return Buffer.byteLength(JSON.stringify(obj), "utf8"); } catch { return 0; }
   }
+  /**
+   * Encode a value using a per-model serializer if one exists; otherwise return the value unchanged.
+   *
+   * @param model - The model name used to look up a serializer.
+   * @param value - The value to encode.
+   * @returns The encoded value when a serializer for `model` is available; otherwise the original `value`.
+   */
   function encodeValue(model: string, value: any) {
     const ser = (serializers as any)[model];
     return ser ? ser.encode(value) : value;

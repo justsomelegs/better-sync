@@ -4,6 +4,16 @@ import IndexedDBBackend from "absurd-sql/dist/indexeddb-backend.js";
 
 let db: any;
 
+/**
+ * Initialize and return the shared SQL.js database instance backed by IndexedDB (Absurd-SQL).
+ *
+ * Ensures a single SQL.Database is created and prepared for use: loads SQL.js, mounts an IndexedDB-backed filesystem at /sql,
+ * opens/creates the SQLite file `/sql/{dbName}.sqlite`, applies performance PRAGMA settings, and ensures the `kv` table exists.
+ * On first initialization this function assigns the database to the module-level `db` variable.
+ *
+ * @param dbName - Base name for the SQLite file (the function uses `/sql/{dbName}.sqlite`).
+ * @returns A promise that resolves to the initialized SQL.Database instance.
+ */
 async function ensureDb(dbName: string) {
   if (db) return db;
   const SQL = await initSqlJs({ locateFile: (f: string) => new URL(`../../../node_modules/@jlongster/sql.js/dist/${f}`, (self as any).location as any).toString() });
