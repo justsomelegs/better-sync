@@ -286,3 +286,68 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 - Errors: standardized JSON codes.
 - Out-of-scope: auth, external write capture, CLI, advanced queries.
 
+---
+
+## Additional MVP Clarifications
+
+### Runtime & Compatibility
+- Server runtime target: Node.js 18+ (Bun compatible), not Edge in MVP (due to SQLite driver).
+- Client: ESM-first, works in browsers and Node (SSR safe). SSE via `EventSource` in browsers; fetch-based stream on Node.
+- CORS: same-origin by default; cross-origin allowed if server/framework enables it (not configured by this library in MVP).
+
+### Composite Primary Keys
+- PK type is either a scalar (string|number) or an object of key fields.
+- API accepts:
+  - `select('id')`, `watch('id', ...)` for scalar PK
+  - `select({ id, workspaceId })`, `watch({ id, workspaceId }, ...)` for composite PK
+- Type inference exposes `typeof client.<table>.$pk`.
+
+### Query Semantics & Limits
+- `where` is a client-side predicate in MVP. For query-based `select`/`watch`, the client:
+  - performs an initial read with `{ select, orderBy, limit, offset }` to build a snapshot
+  - re-runs the same read upon relevant mutation events (see SSE model below)
+- Defaults:
+  - `limit` default: 100
+  - `limit` max: 1000 (excess is clamped)
+  - `orderBy` default: `{ updatedAt: 'desc' }`
+- `select` narrows fields and types; unspecified implies full row.
+
+### Mutation Semantics & Idempotency
+- Mutations are transactional; server sets/normalizes `id` (ULID if missing) and `updatedAt` (ms) before commit.
+- Optional idempotency: clients may send `Idempotency-Key` header on `insert/update/delete` to dedupe accidental retries (MVP support is best-effort; duplicates are rare with ULIDs).
+- Bulk update/delete by `where` is resolved client-side by first selecting PKs, then performing batch operations by PK on the server.
+- Return shapes:
+  - `insert(row|rows) -> row | row[]`
+  - `update(id, patch) -> row`
+  - `update({ where }, { set }) -> { updated: number, pks: Array<PK> }`
+  - `delete(id) -> { ok: true }`
+  - `delete({ where }) -> { deleted: number, pks: Array<PK> }`
+
+### SSE Event Model (MVP)
+- Event is emitted after successful mutation commit. Event payload:
+```json
+{ "tables": [{ "name": "todos", "pks": ["t1","t2"], "type": "mutation" }] }
+```
+- The client routes events to active subscriptions:
+  - `watch(id, ...)`: if PK matches, re-fetch that row via `select(id)` and emit callback.
+  - `watch(query, ...)`: if any table in event matches the watched table, re-run `select(query)` to recompute the snapshot/window.
+- Reconnection:
+  - On SSE disconnect, client enters `retrying` with exponential backoff (base 500 ms, max 5 s), then resubscribes and re-runs snapshots to reconcile.
+  - No cursor is required in MVP since events are library-originated; on reconnect we do a fresh snapshot to avoid misses.
+- Poll fallback:
+  - If SSE is unavailable, client polls `select(query)` on an interval (default 1500 ms) for active `watch`es.
+
+### Security (MVP)
+- No authentication/authorization. Intended for trusted/internal environments in MVP.
+- CSRF: endpoints are POST-only for mutations; same-origin recommended.
+- Future: add pluggable auth (e.g., header → user context) without breaking surface.
+
+### Observability (MVP)
+- Minimal server logs: request summary, error logs, and mutation summaries.
+- Optional `X-Request-Id` echo; include in error `details` when present.
+
+### Limits
+- Max payload size (request/response): 1 MB default (configurable per framework/environment).
+- Max batch size for mutations: 100 rows (excess rejected with `BAD_REQUEST`).
+- Timeouts: server handlers target 10 s default per request.
+
