@@ -21,6 +21,8 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
   const tenantId = _config.tenantId;
   const metrics = _config.metrics;
   const wsSubscribers = new Map<string, Set<(rows: any[]) => void>>();
+  const lastCursorByModel = new Map<string, string>();
+  const lastCursorByShape = new Map<string, string>();
   const serializers = (_config.serializers ?? {}) as SyncClientConfig<TSchema>["serializers"];
   const storage = _config.storage;
   const backoffBase = _config.backoffBaseMs ?? 250;
@@ -70,14 +72,25 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
         try {
           inFlight += 1;
           metrics?.on("applySent", { count: batch.length, model: firstModel });
-          const body = batch.length === 1
+          const bodyObj = batch.length === 1
             ? { model: batch[0]!.model, change: { type: batch[0]!.type, id: batch[0]!.id, value: batch[0]!.value, patch: batch[0]!.patch } }
             : { changes: batch };
-          const res = await fetch(`${baseUrl}${basePath}/apply`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", ...(tenantId ? { "x-tenant-id": tenantId } : {}) },
-            body: JSON.stringify(body),
-          });
+          let headers: Record<string, string> = { ...(tenantId ? { "x-tenant-id": tenantId } : {}) };
+          let payload: BodyInit;
+          const raw = JSON.stringify(bodyObj);
+          if (raw.length >= compressMinBytes && typeof (globalThis as any).CompressionStream !== "undefined") {
+            headers["Content-Encoding"] = "gzip";
+            headers["Content-Type"] = "application/json";
+            const cs = new (globalThis as any).CompressionStream("gzip");
+            const writer = cs.writable.getWriter();
+            writer.write(new TextEncoder().encode(raw));
+            writer.close();
+            payload = cs.readable as any;
+          } else {
+            headers["Content-Type"] = "application/json";
+            payload = raw;
+          }
+          const res = await fetch(`${baseUrl}${basePath}/apply`, { method: "POST", headers, body: payload });
           if (res.ok) { metrics?.on("applyAck", { count: batch.length, model: firstModel }); inFlight -= 1; continue; }
         } catch { /* network error -> fallthrough */ }
         finally { if (inFlight > 0) inFlight -= 1; }
@@ -100,14 +113,16 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
         setStatus({ state: "connecting" });
         const refreshModel = async (model: string) => {
           try {
-            const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent(model)}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined }); metrics?.on("pull", { model });
+            const since = lastCursorByModel.get(model);
+            const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent(model)}${since ? `&since=${encodeURIComponent(since)}` : ""}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined }); metrics?.on("pull", { model });
             if (res.ok) {
               const data = await res.json();
               const set = wsSubscribers.get(model);
-              if (data?.ok && data?.value?.rows && set?.size) {
+              if (data?.ok && data?.value?.rows) {
                 const ser = (serializers as any)[model];
                 const rows = ser ? (data.value.rows as any[]).map((r) => ser.decode(r)) : data.value.rows;
-                set.forEach((cb) => cb(rows));
+                if (set?.size) set.forEach((cb) => cb(rows));
+                if (data?.value?.cursor) lastCursorByModel.set(model, String(data.value.cursor));
               }
             }
           } catch { }
@@ -200,13 +215,15 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
       // initial pull
       void (async () => {
         try {
-          const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent(params.model)}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined });
+          const since = lastCursorByModel.get(params.model);
+          const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent(params.model)}${since ? `&since=${encodeURIComponent(since)}` : ""}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined });
           if (res.ok) {
             const data = await res.json();
             if (data?.ok && data?.value?.rows) {
               const ser = (serializers as any)[params.model];
               const rows = ser ? (data.value.rows as any[]).map((r) => ser.decode(r)) : data.value.rows;
               cb(rows);
+              if (data?.value?.cursor) lastCursorByModel.set(params.model, String(data.value.cursor));
             }
           }
         } catch { }
@@ -221,7 +238,9 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
       const refresh = async () => {
         if (unpinned) return;
         try {
-          const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent("*")}&shapeId=${encodeURIComponent(shapeId)}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined });
+          const since = lastCursorByShape.get(shapeId);
+          const res = await fetch(`${baseUrl}${basePath}/pull?model=${encodeURIComponent("*")}&shapeId=${encodeURIComponent(shapeId)}${since ? `&since=${encodeURIComponent(since)}` : ""}`, { headers: tenantId ? { "x-tenant-id": tenantId } : undefined });
+          if (res.ok) { const j = await res.json(); if (j?.value?.cursor) lastCursorByShape.set(shapeId, String(j.value.cursor)); }
           void res.arrayBuffer(); // fire-and-forget to warm cache
         } catch { }
       };

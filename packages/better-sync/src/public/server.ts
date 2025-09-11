@@ -202,6 +202,11 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
             const since = u.searchParams.get("since");
             if (!model) return json(res, 400, { ok: false, error: syncError("SYNC:CHANGE_REJECTED", "Missing model", { path: basePath }) });
             let rows = Array.from(getModelMap(tenantId, model).values());
+            if (_config.canRead) {
+              const filtered: any[] = [];
+              for (const r of rows) { if (await _config.canRead(req, model, r)) filtered.push(r); }
+              rows = filtered;
+            }
             if (shapeId) {
               const t = shapes.get(tenantId); const def = t?.get(shapeId);
               if (def && def.model === model) {
@@ -229,6 +234,12 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
               : body && body.model && body.change ? [{ model: body.model, ...body.change }] : [];
             if (!changes.length) {
               return json(res, 400, { ok: false, error: syncError("SYNC:CHANGE_REJECTED", "Invalid change payload", { path: basePath }) });
+            }
+            if (_config.canWrite) {
+              for (const ch of changes) {
+                const ok = await _config.canWrite(req, ch.model, ch as any);
+                if (!ok) return json(res, 403, { ok: false, error: syncError("SYNC:FORBIDDEN", "Change rejected by ACL", { path: basePath }) });
+              }
             }
             const affected = new Set<string>(); changes.forEach((c: any) => affected.add(c.model));
             try {

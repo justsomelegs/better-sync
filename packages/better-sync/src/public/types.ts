@@ -137,6 +137,9 @@ export interface SyncServerConfig {
   forbid?: (req: any) => boolean | Promise<boolean>;
   /** Return true to send SYNC:RATE_LIMITED (429). */
   shouldRateLimit?: (req: any) => boolean | Promise<boolean>;
+  /** Optional row-level ACLs. */
+  canRead?: (req: any, model: string, row: any) => boolean | Promise<boolean>;
+  canWrite?: (req: any, model: string, change: Change) => boolean | Promise<boolean>;
 }
 export interface SyncServer {
   attachWebSocket?(server: any): any; // optional WS attach helper
