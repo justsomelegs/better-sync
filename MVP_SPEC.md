@@ -194,6 +194,30 @@ await client.todos.delete({ where: ({ done }) => done });
 
 Writes are transactional on the server; on success, the server emits SSE events to watching clients. No DB triggers or scanners in MVP.
 
+### Upsert – `upsert`
+
+```ts
+// Upsert by primary key
+const up = await client.todos.upsert({ id: 't1', title: 'Buy eggs', done: false });
+
+// Upsert many (array)
+const ups = await client.todos.upsert([
+  { id: 't2', title: 'Call mom', done: false },
+  { id: 't3', title: 'Water plants', done: true }
+]);
+
+// Options: control merge behavior
+const up2 = await client.todos.upsert(
+  { id: 't1', title: 'Buy eggs', done: false },
+  { merge: ['title', 'done'] } // only these fields updated on conflict
+);
+```
+
+Semantics:
+- Conflict target defaults to primary key.
+- On conflict: merge fields (default: all input fields except id/updatedAt) or as specified by `merge`.
+- Returns the upserted row(s). Server sets/updates `updatedAt`.
+
 ---
 
 ## Realtime Semantics
@@ -279,7 +303,7 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 - Schema: single plain object; Zod/ArkType/TS-only supported; inline overrides per table.
 - Server: `createSync`; SQLite adapter; internal routes `/events`, `/mutate`, `/select`; SSE default.
 - Client: `createClient<typeof schema>`; SSE default with HTTP fallback; `.close()`.
-- Reads: `select(id|query)` with `{ where, select, orderBy, limit, offset }` (predicate runs client-side in MVP).
+- Reads: `select(id|query)` with `{ where, select, orderBy, limit, cursor }` (predicate runs client-side in MVP).
 - Subs: `watch(id|query, cb, opts?)` unified API.
 - Writes: `insert`, `update(id|where)`, `delete(id|where)`; server authoritative; emits SSE on success.
 - Errors: standardized JSON codes.
@@ -303,7 +327,7 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 
 ### Query Semantics & Limits
 - `where` is a client-side predicate in MVP. For query-based `select`/`watch`, the client:
-  - performs an initial read with `{ select, orderBy, limit, offset }` to build a snapshot
+  - performs an initial read with `{ select, orderBy, limit }` (and `cursor` for pagination) to build a snapshot
   - re-runs the same read upon relevant mutation events (see SSE model below)
 - Defaults:
   - `limit` default: 100
@@ -315,12 +339,14 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 - Mutations are transactional; server sets/normalizes `id` (ULID if missing) and `updatedAt` (ms) before commit.
 - Optional idempotency: clients may send `Idempotency-Key` header on `insert/update/delete` to dedupe accidental retries (MVP support is best-effort; duplicates are rare with ULIDs).
 - Bulk update/delete by `where` is resolved client-side by first selecting PKs, then performing batch operations by PK on the server.
+- Per-row outcomes for bulk operations:
+  - `{ ok: number, failed: Array<{ pk: PK, error: { code: string, message: string } }>, pks: Array<PK> }`
 - Return shapes:
   - `insert(row|rows) -> row | row[]`
   - `update(id, patch) -> row`
-  - `update({ where }, { set }) -> { updated: number, pks: Array<PK> }`
+  - `update({ where }, { set }) -> { ok, failed, pks }`
   - `delete(id) -> { ok: true }`
-  - `delete({ where }) -> { deleted: number, pks: Array<PK> }`
+  - `delete({ where }) -> { ok, failed, pks }`
 
 ### SSE Event Model (MVP)
 - Event is emitted after successful mutation commit. Event payload:
@@ -349,4 +375,9 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 - Max payload size (request/response): 1 MB default (configurable per framework/environment).
 - Max batch size for mutations: 100 rows (excess rejected with `BAD_REQUEST`).
 - Timeouts: server handlers target 10 s default per request.
+
+### Database Responsibilities (MVP)
+- The library does not modify DB settings (e.g., WAL) or create indexes automatically.
+- Users are responsible for appropriate indexing (recommended: primary key, and any fields used in orderBy like `updatedAt`).
+- We’ll provide docs with recommended indexes and migration examples.
 
