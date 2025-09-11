@@ -1,0 +1,288 @@
+## Sync Engine MVP – Product & API Specification
+
+This document codifies the agreed MVP goals, constraints, and API. It is the single source of truth for our initial release. Future agents should read this before implementing or proposing changes.
+
+### Vision
+- **Type-safe sync engine for TypeScript** with excellent DX, inspired by Better Auth’s extensibility and simplicity.
+- **Environment-agnostic**: serverless/ephemeral friendly, Node, edge runtimes, browsers.
+- **SQLite-first MVP**: minimal infra, predictable behavior.
+- **Realtime by default**: SSE for updates, HTTP POST for mutations; fall back to HTTP polling only if SSE is unavailable.
+- **Bring Your Own Schema**: accept plain Zod/ArkType/TS types; no custom DSL/helpers.
+- **Zero user routing**: endpoints internally powered (Better Call under the hood), devs only mount a handler.
+
+### Non-Goals (MVP)
+- No DB triggers or CDC/scanning for external writers. MVP observes only writes performed through our API.
+- No auth/authorize pipeline in MVP (will be added later without breaking API).
+- No query DSL or server-side filter push-down beyond basic shapes (predicate runs client-side in MVP).
+- No CLI/codegen. No additional ORMs beyond schema compatibility.
+
+---
+
+## Architecture Snapshot (MVP)
+- **Server**: `createSync({ schema, storage })` where storage is a SQLite adapter. Server is authoritative for `id` and `updatedAt`.
+- **Transport**: Internally uses Better Call to expose `GET /events` (SSE), `POST /mutate`, `POST /select`. Developer mounts a single exported handler for their framework.
+- **Client**: `createClient<typeof schema>({ baseURL, realtime?: 'sse' | 'poll' | 'off', pollIntervalMs? })`. Defaults to SSE realtime; silently falls back to polling if needed.
+- **Change propagation**: On successful server mutations (via our API), the server emits an SSE event. Subscribed clients refresh affected data immediately. No background scanners/triggers in MVP.
+
+---
+
+## Schema Model (BYO)
+- Single object keyed by collection/table name.
+- Accepts Zod/ArkType validators or TS-only types.
+- Defaults: `primaryKey = ['id']`, `updatedAt = 'updatedAt'`.
+- Inline overrides allowed per table when DB names differ.
+
+Examples:
+
+```ts
+// Zod-only (runtime validation + strong inference)
+import { z } from 'zod';
+
+export const schema = {
+  todos: z.object({
+    id: z.string(),
+    title: z.string(),
+    done: z.boolean().default(false),
+    updatedAt: z.number()
+  }),
+  posts: {
+    table: 'app_posts',
+    primaryKey: ['id'],
+    updatedAt: 'updated_at',
+    schema: z.object({ id: z.string(), title: z.string(), body: z.string(), updated_at: z.number() })
+  }
+} as const;
+```
+
+```ts
+// TS-only (no runtime validation)
+type Todo = { id: string; title: string; done: boolean; updatedAt: number };
+
+export const schema = {
+  todos: {} as unknown as Todo
+} as const;
+```
+
+Notes:
+- We do not provide helper functions. The schema object is plain.
+- If a validator is present, server validates mutations; TS-only is types-only.
+
+---
+
+## Server API (MVP)
+
+```ts
+import { createSync } from '@sync/core';
+import { sqliteAdapter } from '@sync/adapter-sqlite';
+import { schema } from './schema';
+
+export const sync = createSync({
+  schema,
+  storage: sqliteAdapter({ url: 'file:./app.db' })
+});
+
+// Framework mounting (examples)
+export const handler = sync.handler;      // Express/Hono style
+export const fetch = sync.fetch;          // (req: Request) => Promise<Response>
+export const next = sync.nextHandlers();  // { GET, POST } for Next.js route handlers
+```
+
+Internalized routes (no configuration needed):
+- `GET    /events` – SSE stream (default realtime channel)
+- `POST   /mutate` – unified insert/update/delete endpoint
+- `POST   /select` – read endpoint
+
+Server behavior:
+- Generates IDs (ULID) if missing.
+- Sets `updatedAt` (ms) on each write; LWW conflict policy on `updatedAt` with deterministic tie-breaker on `id`.
+- Emits SSE events after successful writes.
+
+Auth: Out of scope for MVP. To be added later (headers/callbacks) without breaking API.
+
+---
+
+## Client API (MVP)
+
+```ts
+import { createClient } from '@sync/client';
+import { schema } from './schema';
+
+export const client = createClient<typeof schema>({
+  baseURL: '/api/sync',
+  realtime: 'sse',       // default
+  pollIntervalMs: 1500   // used only if SSE is unavailable
+});
+
+// Optional teardown
+// client.close();
+```
+
+### Reads – `select`
+
+```ts
+// By id or composite PK object
+const one = await client.todos.select('t1', { select: ['id','title','done'] });
+
+// By query (predicate is type-safe; evaluated client-side in MVP)
+const list = await client.todos.select({
+  where: ({ done, title }) => !done && title.includes('milk'),
+  select: ['id','title','updatedAt'],
+  orderBy: { updatedAt: 'desc' },
+  limit: 50,
+  offset: 0
+});
+```
+
+### Subscriptions – `watch`
+
+```ts
+// Single row
+const sub1 = client.todos.watch(
+  't1',
+  ({ item, change, cursor }) => {
+    // item: Todo | null
+    // change: { type: 'inserted' | 'updated' | 'deleted'; item?: Todo }
+  },
+  { select: ['id','title'] }
+);
+
+// Query-based (predicate runs client-side in MVP)
+const sub2 = client.todos.watch(
+  {
+    where: ({ done }) => !done,
+    select: ['id','title'],
+    orderBy: { updatedAt: 'desc' },
+    limit: 50,
+    offset: 0
+  },
+  ({ data, changes, cursor }) => {
+    // data: Todo[]
+    // changes: { inserted: Todo[]; updated: Todo[]; deleted: Array<string|Record<string,unknown>> }
+  }
+);
+
+// Handle
+sub1.unsubscribe();
+```
+
+Subscription handle shape:
+- `unsubscribe(): void`
+- `status: 'connecting' | 'live' | 'retrying'`
+- `error?: Error`
+- `getSnapshot(): Row | Row[] | null`
+
+### Writes – `insert` / `update` / `delete`
+
+```ts
+// Insert (returns inserted row(s)); server fills id and updatedAt
+const inserted = await client.todos.insert({ title: 'Buy milk', done: false });
+
+// Update by id
+const updated = await client.todos.update('t1', { done: true });
+
+// Update by where (client resolves PKs via select, then server updates by PK)
+const bulk = await client.todos.update(
+  { where: ({ title }) => title.includes('milk') },
+  { set: { done: true } }
+);
+
+// Delete by id
+await client.todos.delete('t1');
+
+// Delete by where (client resolves PKs via select, then server deletes by PK)
+await client.todos.delete({ where: ({ done }) => done });
+```
+
+Writes are transactional on the server; on success, the server emits SSE events to watching clients. No DB triggers or scanners in MVP.
+
+---
+
+## Realtime Semantics
+- **Default**: SSE for push notifications on successful server-side mutations.
+- **Fallback**: If SSE is unsupported, client falls back to periodic HTTP polling (interval configurable). When events are received, matching `watch` subscriptions refresh their data.
+- **External DB writes** (not via our API): Not observed in MVP. Post-MVP will add DB triggers/CDC/scanners.
+
+---
+
+## Consistency & Conflicts
+- Server is authoritative for `id` and `updatedAt`.
+- Conflict resolution: **LWW** on `updatedAt`, tie-breaker by `id`.
+- Server validates rows if a validator is provided (Zod/ArkType). TS-only skips runtime validation.
+
+---
+
+## Errors
+Standard JSON error shape:
+- `{ code: 'BAD_REQUEST' | 'UNAUTHORIZED' | 'NOT_FOUND' | 'CONFLICT' | 'INTERNAL', message: string, details?: unknown }`
+
+---
+
+## Extensibility & Internals (MVP boundaries)
+- **Transport**: Better Call is internal; developers never import it. We expose `handler`, `fetch`, `nextHandlers` only.
+- **Plugins**: Hook system designed but not exposed in MVP; default behavior baked in.
+- **Storage**: SQLite adapter only in MVP. Post-MVP: Postgres, D1/libsql, DynamoDB, etc.
+
+---
+
+## Post-MVP Roadmap (high level)
+- DB triggers/CDC or incremental scanners to observe external writes.
+- Server-side filter push-down and query planner; richer query builder.
+- Authentication/authorization hooks (headers → user context → policy).
+- Additional adapters (Postgres with LISTEN/NOTIFY, libsql/D1, Redis pubsub notifier).
+- CLI/codegen (optional) to generate types, handlers, and project scaffolding.
+- WebSocket/SSE multiplexing for advanced realtime; presence and backpressure handling.
+
+---
+
+## Example: Svelte Usage with `.watch`
+
+```ts
+// lib/syncClient.ts
+import { createClient } from '@sync/client';
+import { schema } from '../schema';
+
+export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
+```
+
+```svelte
+<!-- routes/TodosList.svelte -->
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { writable } from 'svelte/store';
+  import { client } from '$lib/syncClient';
+
+  type Todo = typeof client.todos.$infer;
+  const todos = writable<Todo[]>([]);
+  let sub: { unsubscribe: () => void } | null = null;
+
+  onMount(() => {
+    sub = client.todos.watch(
+      { where: ({ done }) => !done, select: ['id','title'], orderBy: { updatedAt: 'desc' }, limit: 50 },
+      ({ data }) => todos.set(data)
+    );
+    return () => sub?.unsubscribe();
+  });
+</script>
+
+<ul>
+  {#each $todos as t}
+    <li>{t.title}</li>
+  {/each}
+  {#if !$todos.length}
+    <li>Loading…</li>
+  {/if}
+</ul>
+```
+
+---
+
+## MVP Checklist
+- Schema: single plain object; Zod/ArkType/TS-only supported; inline overrides per table.
+- Server: `createSync`; SQLite adapter; internal routes `/events`, `/mutate`, `/select`; SSE default.
+- Client: `createClient<typeof schema>`; SSE default with HTTP fallback; `.close()`.
+- Reads: `select(id|query)` with `{ where, select, orderBy, limit, offset }` (predicate runs client-side in MVP).
+- Subs: `watch(id|query, cb, opts?)` unified API.
+- Writes: `insert`, `update(id|where)`, `delete(id|where)`; server authoritative; emits SSE on success.
+- Errors: standardized JSON codes.
+- Out-of-scope: auth, external write capture, CLI, advanced queries.
+
