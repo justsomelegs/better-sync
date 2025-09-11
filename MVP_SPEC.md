@@ -22,6 +22,8 @@ This document codifies the agreed MVP goals, constraints, and API. It is the sin
 - **Server**: `createSync({ schema, storage })` where storage is a SQLite adapter. Server is authoritative for `id` and `updatedAt`.
 - **Transport**: Internally uses Better Call to expose `GET /events` (SSE), `POST /mutate`, `POST /select`. Developer mounts a single exported handler for their framework.
 - **Client**: `createClient<typeof schema>({ baseURL, realtime?: 'sse' | 'poll' | 'off', pollIntervalMs? })`. Defaults to SSE realtime; silently falls back to polling if needed.
+- **Client state**: Local-first optimistic cache applies writes immediately; reconciles on server acknowledgment; rolls back on error. Inserts use temporary IDs remapped to server ULIDs.
+- **Realtime resume**: SSE events include monotonic event IDs and support resuming via `Last-Event-ID` (or `?since=`). Server maintains a small in-memory ring buffer for gapless reconnects.
 - **Change propagation**: On successful server mutations (via our API), the server emits an SSE event. Subscribed clients refresh affected data immediately. No background scanners/triggers in MVP.
 
 ---
@@ -194,6 +196,12 @@ await client.todos.delete({ where: ({ done }) => done });
 
 Writes are transactional on the server; on success, the server emits SSE events to watching clients. No DB triggers or scanners in MVP.
 
+Local-first optimistic writes (default):
+- Client applies changes to a local cache immediately for instant UI.
+- On server success (200), cache is reconciled with authoritative row properties (`id`, `updatedAt`).
+- On failure, the client automatically rolls back the local change.
+- Inserts use temporary IDs that are remapped to server-issued ULIDs upon acknowledgment.
+
 ### Upsert – `upsert`
 
 ```ts
@@ -221,7 +229,8 @@ Semantics:
 ---
 
 ## Realtime Semantics
-- **Default**: SSE for push notifications on successful server-side mutations.
+- **Default**: SSE for push notifications on successful server-side mutations, with event IDs and resume support.
+- **Resume**: Clients include `Last-Event-ID` (or `?since=`) on reconnect to receive any missed events from a small server-side buffer; if the buffer cannot satisfy, the client performs a fresh snapshot.
 - **Fallback**: If SSE is unsupported, client falls back to periodic HTTP polling (interval configurable). When events are received, matching `watch` subscriptions refresh their data.
 - **External DB writes** (not via our API): Not observed in MVP. Post-MVP will add DB triggers/CDC/scanners.
 
@@ -349,7 +358,8 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
   - `delete({ where }) -> { ok, failed, pks }`
 
 ### SSE Event Model (MVP)
-- Event is emitted after successful mutation commit. Event payload:
+- Event is emitted after successful mutation commit. Each SSE message includes a monotonic `id` using the SSE `id:` field to enable resume.
+  Event payload (data field) example:
 ```json
 { "tables": [{ "name": "todos", "pks": ["t1","t2"], "type": "mutation" }] }
 ```
@@ -357,8 +367,8 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
   - `watch(id, ...)`: if PK matches, re-fetch that row via `select(id)` and emit callback.
   - `watch(query, ...)`: if any table in event matches the watched table, re-run `select(query)` to recompute the snapshot/window.
 - Reconnection:
-  - On SSE disconnect, client enters `retrying` with exponential backoff (base 500 ms, max 5 s), then resubscribes and re-runs snapshots to reconcile.
-  - No cursor is required in MVP since events are library-originated; on reconnect we do a fresh snapshot to avoid misses.
+  - On SSE disconnect, client enters `retrying` with exponential backoff (base 500 ms, max 5 s), then resubscribes with `Last-Event-ID` to resume from the last processed event.
+  - If the server-side buffer cannot replay the requested range, the client performs a fresh snapshot to avoid misses.
 - Poll fallback:
   - If SSE is unavailable, client polls `select(query)` on an interval (default 1500 ms) for active `watch`es.
 
