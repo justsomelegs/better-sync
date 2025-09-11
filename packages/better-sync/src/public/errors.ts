@@ -4,6 +4,7 @@ import type { SyncError, SyncErrorCode } from "./types.js";
  * Create a SyncError object with stable SYNC:* code and optional metadata.
  * @example
  * const err = syncError("SYNC:UNAUTHORIZED", "Missing token", { path: "/api/sync" });
+ * // Map to HTTP 401 and include helpUrl for humans
  */
 export const ERROR_DOCS_BASE = "https://docs.better-sync.dev/errors#" as const;
 export function helpUrlFor(code: SyncErrorCode): string {

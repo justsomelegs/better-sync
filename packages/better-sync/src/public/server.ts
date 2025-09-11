@@ -3,9 +3,20 @@ import { syncError } from "./errors.js";
 import { getSyncJsonMeta } from "./sync-json.js";
 /**
  * Create a sync server instance.
+ *
  * @example
- * const server = betterSync({ basePath: "/api/sync" });
+ * import express from "express";
+ * import { betterSync } from "better-sync";
+ * import { sqlite } from "better-sync/storage";
+ * const app = express();
+ * const server = betterSync({
+ *   basePath: "/api/sync",
+ *   authorize: (req) => Boolean(req.headers["authorization"]),
+ *   canRead: (_req, _model, _row) => true,
+ *   canWrite: (_req, _model, _change) => true,
+ * });
  * app.use("/api/sync", server.fetch());
+ * app.listen(3000);
  */
 /**
  * Build a Better Sync server instance.
@@ -158,7 +169,14 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
     }
   };
   const buildApi = (fixedTenant?: string) => ({
-    /** Apply a batch of changes for a tenant (direct/server-side). */
+    /**
+     * Apply a batch of changes for a tenant (direct/server-side).
+     *
+     * @example
+     * const result = await server.api.apply({ tenantId: "t1", changes: [
+     *   { model: "todo", type: "insert", id: "t1", value: { id: "t1", title: "A" } },
+     * ]});
+     */
     async apply(input: { tenantId?: string; changes: any[] }) {
       const tenantId = fixedTenant ?? input?.tenantId ?? "default";
       const changes = Array.isArray(input?.changes) ? input.changes : [];
@@ -166,9 +184,20 @@ export function betterSync(_config: SyncServerConfig): SyncServer {
       broadcastPoke();
       return { ok: true, value: { applied: true, cursor: nextCursor(tenantId) } } as const;
     },
-    /** Return a tenant-bound API (no network). */
+    /**
+     * Return a tenant-bound API (no network).
+     *
+     * @example
+     * const t1 = server.api.withTenant("t1");
+     * await t1.apply({ changes: [{ model: "todo", type: "insert", id: "x", value: { id: "x", title: "B" } }] });
+     */
     withTenant(id?: string) { return buildApi(id); },
-    /** Register a shape and return its id (per-tenant namespace). */
+    /**
+     * Register a shape and return its id (per-tenant namespace).
+     *
+     * @example
+     * const { id } = server.api.registerShape({ tenantId: "t1", model: "todo", where: { done: false }, select: ["id","title"] });
+     */
     registerShape(input: { tenantId?: string; model: string; where?: Record<string, unknown>; select?: string[] }) {
       const tenantId = fixedTenant ?? input?.tenantId ?? "default";
       const tid = shapeIds.get(tenantId) ?? 0; const idNum = tid + 1; shapeIds.set(tenantId, idNum);

@@ -6,10 +6,21 @@ function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)); }
  * - WebSocket-first transport with HTTP fallback and exponential backoff
  * - Background sender loop drains enqueued changes when connected
  * - 30s heartbeat; live "poke" refreshes subscribed models
+ *
  * @example
- * const sync = createClient({ baseUrl: "http://localhost:3000" });
+ * // With absurd-sql storage (workerized), typed models, and status hook
+ * import { createSyncClient, defineSchema } from "better-sync";
+ * import { absurd } from "better-sync/storage";
+ * type Todo = { id: string; title: string; done: boolean; updated_at: string };
+ * const models = defineSchema({ todo: {} as Todo });
+ * const sync = createSyncClient<typeof models>({
+ *   baseUrl: "http://localhost:3000",
+ *   storage: absurd({ dbName: "app", useWorker: "auto" }),
+ *   compressMinBytes: 8 * 1024,
+ * });
+ * sync.onStatus((s) => console.log("status", s));
  * await sync.connect();
- * await sync.applyChange("todo", { type: "insert", id: "1", value: { title: "A" } });
+ * await sync.applyChange("todo", { type: "insert", id: "t1", value: { id: "t1", title: "A", done: false, updated_at: new Date().toISOString() } });
  * await sync.drain();
  */
 export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_config: SyncClientConfig<TSchema>): SyncClient<TSchema> {
@@ -178,6 +189,16 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
         }
       })();
     },
+    /**
+     * Subscribe to connection status changes.
+     *
+     * @example
+     * const sub = sync.onStatus((s) => {
+     *   if (s.state === "backoff") console.log("retrying in", s.nextMs);
+     * });
+     * // later
+     * sub.unsubscribe();
+     */
     onStatus(cb: (s: import("./types.js").SyncClientStatus) => void) { statusSubscribers.add(cb); return { unsubscribe() { statusSubscribers.delete(cb); } }; },
     getStatus() { return status; },
     async applyChange<TModel extends ModelName<TSchema>>(model: TModel, change: { type: "insert" | "update" | "delete"; id: string; value?: RowOf<TSchema, TModel>; patch?: Partial<RowOf<TSchema, TModel>> }) {
@@ -210,9 +231,11 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
     /**
      * Subscribe to a model. Immediately pulls current rows, then refreshes
      * whenever the server sends a WS "poke".
+     *
      * @example
-     * const sub = sync.subscribeQuery({ model: "todo" }, rows => {
-     *   console.log(rows);
+     * // Narrow columns via select; callback rows are typed
+     * const sub = sync.subscribeQuery({ model: "todo", select: ["id","title"] as const }, rows => {
+     *   rows.forEach(r => console.log(r.id, r.title));
      * });
      * // later: sub.unsubscribe()
      */
@@ -253,6 +276,13 @@ export function createSyncClient<TSchema extends SchemaModels = SchemaModels>(_c
       void refresh();
       return { unpin() { unpinned = true; } };
     },
+    /**
+     * Create a lightweight snapshot marker in client storage.
+     * Use together with your own export/backup to retain local state.
+     *
+     * @example
+     * await sync.createSnapshot("todo");
+     */
     async createSnapshot(model?: string) {
       if (!storage) return;
       const stamp = Date.now();
