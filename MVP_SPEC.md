@@ -733,3 +733,125 @@ export function memory() {
 - Users are responsible for appropriate indexing (recommended: primary key, and any fields used in orderBy like `updatedAt`).
 - We’ll provide docs with recommended indexes and migration examples.
 
+---
+
+## Authoritative Types (MVP)
+
+Type aliases and interfaces an implementer can rely on.
+
+```ts
+// Primary key can be scalar or composite object
+export type PrimaryKey = string | number | Record<string, string | number>;
+
+export type OrderBy = Record<string, 'asc' | 'desc'>;
+
+export type SelectWindow = {
+  select?: string[];
+  orderBy?: OrderBy; // default { updatedAt: 'desc' }
+  limit?: number;    // default 100, max 1000
+  cursor?: string | null;
+};
+
+export type MutationOp =
+  | { op: 'insert'; table: string; rows: Record<string, unknown> | Record<string, unknown>[] }
+  | { op: 'update'; table: string; pk: PrimaryKey; set: Record<string, unknown>; ifVersion?: number }
+  | { op: 'updateWhere'; table: string; where: unknown; set: Record<string, unknown> }
+  | { op: 'delete'; table: string; pk: PrimaryKey }
+  | { op: 'deleteWhere'; table: string; where: unknown }
+  | { op: 'upsert'; table: string; rows: Record<string, unknown> | Record<string, unknown>[]; merge?: string[] };
+
+export type MutationRequest = MutationOp & {
+  clientOpId?: string;
+};
+
+export type MutationResponse =
+  | { row: Record<string, unknown> }
+  | { rows: Record<string, unknown>[] }
+  | { ok: true }
+  | { ok: number; failed: Array<{ pk: PrimaryKey; error: { code: string; message: string } }>; pks: PrimaryKey[] };
+
+export type SelectRequest = {
+  table: string;
+  where?: unknown; // client predicate lives in code; server windows only
+  select?: string[];
+  orderBy?: OrderBy;
+  limit?: number;
+  cursor?: string | null;
+};
+
+export type SelectResponse = { data: Record<string, unknown>[]; nextCursor?: string | null };
+
+export type SseEvent = {
+  eventId: string; // mirrors SSE id
+  txId: string;
+  tables: Array<{
+    name: string;
+    type: 'mutation';
+    pks: PrimaryKey[];
+    rowVersions?: Record<string, number>;
+    diffs?: Record<string, { set?: Record<string, unknown>; unset?: string[] }>;
+  }>;
+};
+
+export interface DatabaseAdapter {
+  begin(): Promise<void>;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+  insert(table: string, row: Record<string, unknown>): Promise<Record<string, unknown>>;
+  updateByPk(table: string, pk: PrimaryKey, set: Record<string, unknown>, opts?: { ifVersion?: number }): Promise<Record<string, unknown>>;
+  deleteByPk(table: string, pk: PrimaryKey): Promise<{ ok: true }>;
+  selectByPk(table: string, pk: PrimaryKey, select?: string[]): Promise<Record<string, unknown> | null>;
+  selectWindow(table: string, req: SelectWindow & { where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
+}
+
+export interface ClientDatastore {
+  // Called on optimistic apply
+  apply(table: string, pk: PrimaryKey, diff: { set?: Record<string, unknown>; unset?: string[] }): Promise<void>;
+  // Reconcile authoritative state by version
+  reconcile(table: string, pk: PrimaryKey, row: Record<string, unknown> & { version: number }): Promise<void>;
+  // Read APIs used by client.select/watch
+  readByPk(table: string, pk: PrimaryKey, select?: string[]): Promise<Record<string, unknown> | null>;
+  readWindow(table: string, req: SelectWindow & { where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
+}
+```
+
+---
+
+## Transport Details (SSE)
+
+- HTTP endpoint: `GET /events`
+- Headers:
+  - Request: `Last-Event-ID` for resume, optional `X-Client-Id` for diagnostics
+  - Response: `Content-Type: text/event-stream`, `Cache-Control: no-cache`
+- Delivery semantics: at-least-once; idempotent by `eventId` and per-row `version`
+- Buffer policy: retain last 60s or 10k events; if resume misses, client performs fresh snapshot
+
+---
+
+## Pagination and Ordering
+
+- Ordering default: `{ updatedAt: 'desc' }`
+- Cursor: opaque string; server returns `nextCursor` or `null`
+- Limits: default 100, max 1000 (excess clamped)
+
+---
+
+## Mutators Definition (Schema)
+
+```ts
+type MutatorDef<Args, Result> = {
+  args: unknown; // validator (e.g., zod schema)
+  handler(ctx: { db: DatabaseAdapter; ctx: Record<string, unknown> }, args: Args): Promise<Result>;
+};
+
+type Mutators = Record<string, MutatorDef<any, any>>;
+
+createSync({
+  schema,
+  database,
+  mutators: {
+    addTodo: { args: z.object({ title: z.string() }), handler: async ({ db }, { title }) => db.insert('todos', { title, done: false }) }
+  }
+});
+```
+
