@@ -20,7 +20,7 @@ import { createSync } from '@sync/core';
 import { sqliteAdapter } from '@sync/adapter-sqlite';
 import { schema } from './schema';
 
-export const sync = createSync({ schema, storage: sqliteAdapter({ url: 'file:./app.db' }) });
+export const sync = createSync({ schema, database: sqliteAdapter({ url: 'file:./app.db' }) });
 export const handler = sync.handler; // Mount in your framework
 ```
 
@@ -57,7 +57,7 @@ That’s it. No routing, no cache setup, no manual optimistic code.
 ---
 
 ## Architecture Snapshot (MVP)
-- **Server**: `createSync({ schema, storage })` where storage is a SQLite adapter. Server is authoritative for `id` and `updatedAt`.
+- **Server**: `createSync({ schema, database })` where database is a SQLite adapter. Server is authoritative for `id` and `updatedAt`.
 - **Transport**: Internally uses Better Call to expose `GET /events` (SSE), `POST /mutate`, `POST /select`. Developer mounts a single exported handler for their framework.
 - **Client**: `createClient<typeof schema>({ baseURL, realtime?: 'sse' | 'poll' | 'off', pollIntervalMs? })`. Defaults to SSE realtime; silently falls back to polling if needed.
 - **Client state**: Local-first optimistic cache applies writes immediately; reconciles on server acknowledgment; rolls back on error. Inserts use temporary IDs remapped to server ULIDs.
@@ -124,7 +124,7 @@ import { schema } from './schema';
 
 export const sync = createSync({
   schema,
-  storage: sqliteAdapter({ url: 'file:./app.db' })
+  database: sqliteAdapter({ url: 'file:./app.db' })
 });
 // `createSync` wires:
 // - transactional mutations
@@ -358,7 +358,7 @@ Standard JSON error shape:
 ## Extensibility & Internals (MVP boundaries)
 - **Transport**: Better Call is internal; developers never import it. We expose `handler`, `fetch`, `nextHandlers` only.
 - **Plugins**: Hook system designed but not exposed in MVP; default behavior baked in.
-- **Storage**: SQLite adapter only in MVP. Post-MVP: Postgres, D1/libsql, DynamoDB, etc.
+- **Database adapters**: SQLite adapter only in MVP. Post-MVP: Drizzle adapters and additional databases (Postgres, D1/libsql, DynamoDB, etc.).
 
 ---
 
