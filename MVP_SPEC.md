@@ -73,6 +73,8 @@ Notes:
 
 ## Server API (MVP)
 
+This section shows how to stand up the server, define custom mutators (server functions), and how request context flows into handlers. The server is authoritative for IDs, versions, and timestamps.
+
 ```ts
 import { createSync } from '@sync/core';
 import { sqliteAdapter } from '@sync/adapter-sqlite';
@@ -82,6 +84,11 @@ export const sync = createSync({
   schema,
   storage: sqliteAdapter({ url: 'file:./app.db' })
 });
+// `createSync` wires:
+// - transactional mutations
+// - version assignment and updatedAt stamping
+// - SSE event emission (with eventId, txId, rowVersions, and optional diffs)
+// - a unified handler interface (handler/fetch/next)
 // Optional: custom mutators (server-side functions)
 export const mutators = sync.defineMutators({
   addTodo: {
@@ -99,6 +106,10 @@ export const mutators = sync.defineMutators({
     }
   }
 });
+// Notes:
+// - `args` provides runtime validation. Types are inferred end-to-end.
+// - `ctx` can include request metadata (e.g., userId) for future auth.
+// - Mutators run inside a server transaction; on success, standard SSE events emit and clients reconcile.
 
 // Framework mounting (examples)
 export const handler = sync.handler;      // Express/Hono style
@@ -122,6 +133,8 @@ Auth: Out of scope for MVP. Request context passthrough supported (e.g., headers
 
 ## Client API (MVP)
 
+The client maintains a local optimistic cache by default. Writes apply immediately, then reconcile with server responses and SSE events. On error, the client auto-rolls back the local change.
+
 ```ts
 import { createClient } from '@sync/client';
 import { schema } from './schema';
@@ -134,6 +147,8 @@ export const client = createClient<typeof schema>({
 // RPC: call server mutators (typed)
 await client.rpc('addTodo', { title: 'Buy eggs' });
 await client.rpc('toggleAll', { done: true });
+
+// Reads and subscriptions automatically stay fresh as mutations land, thanks to SSE.
 
 // Optional teardown
 // client.close();
@@ -194,12 +209,17 @@ Subscription handle shape:
 
 ### Writes – `insert` / `update` / `delete`
 
+Writes accept an optional `clientOpId` for idempotency and clean reconciliation with optimistic state. The client generates these IDs automatically if omitted.
+
 ```ts
 // Insert (returns inserted row(s)); server fills id and updatedAt
 const inserted = await client.todos.insert({ title: 'Buy milk', done: false }, { clientOpId: crypto.randomUUID() });
 
 // Update by id
 const updated = await client.todos.update('t1', { done: true }, { clientOpId: crypto.randomUUID() });
+
+// Delete with rollback handled by the client if the server rejects the change
+await client.todos.delete('t1', { clientOpId: crypto.randomUUID() });
 
 // Update by where (client resolves PKs via select, then server updates by PK)
 const bulk = await client.todos.update(
@@ -221,6 +241,14 @@ Local-first optimistic writes (default):
 - On server success (200), cache is reconciled with authoritative row properties (`id`, `updatedAt`).
 - On failure, the client automatically rolls back the local change.
 - Inserts use temporary IDs that are remapped to server-issued ULIDs upon acknowledgment.
+
+Example optimistic insert with temp ID remap (conceptual):
+```ts
+const tempId = client.optimistic.tempId();
+client.optimistic.insert('todos', { id: tempId, title: 'Buy milk', done: false });
+const res = await client.todos.insert({ title: 'Buy milk', done: false });
+client.optimistic.reconcileId('todos', tempId, res.id);
+```
 
 ### Upsert – `upsert`
 
@@ -249,6 +277,8 @@ Semantics:
 ---
 
 ## Realtime Semantics
+
+SSE is the default realtime channel. Each event has a monotonic `id` and the server keeps a small ring buffer so clients can resume without a full snapshot after brief disconnects.
 - **Default**: SSE for push notifications on successful server-side mutations, with event IDs and resume support.
 - **Resume**: Clients include `Last-Event-ID` (or `?since=`) on reconnect to receive any missed events from a small server-side buffer; if the buffer cannot satisfy, the client performs a fresh snapshot.
 - **Fallback**: If SSE is unsupported, client falls back to periodic HTTP polling (interval configurable). When events are received, matching `watch` subscriptions refresh their data.
@@ -257,6 +287,8 @@ Semantics:
 ---
 
 ## Consistency & Conflicts
+
+We use server-issued versions for causality-aware ordering. This avoids clock skew pitfalls and ensures that newer updates always supersede older ones, even after retries.
 - **Server is authoritative** for canonical state and sequencing. Clients reconcile to server-emitted versions.
 - **Causality-aware versions**:
   - Each row maintains a server-issued monotonic `version` (e.g., per-table sequence or ULID ordered by time) in addition to `updatedAt`.
@@ -403,6 +435,10 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
   ]
 }
 ```
+- `eventId`: Global order for resume/dedupe.
+- `txId`: Groups changes that committed together; clients can update atomically per transaction.
+- `rowVersions`: Per-row monotonic versions so clients only apply newer updates.
+- `diffs` (optional): Minimal changes for efficient cache updates. If absent or insufficient, the client reselects.
 - The client routes events to active subscriptions:
   - `watch(id, ...)`: if PK matches and `rowVersion` is newer than local, apply diff or re-fetch that row via `select(id)` if needed.
   - `watch(query, ...)`: if any table in event matches the watched table, apply diffs to the local window; if not enough info, re-run `select(query)`.
