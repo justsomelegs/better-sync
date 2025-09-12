@@ -215,6 +215,29 @@ declare module '@sync/client' {
 ```
 After this, `createClient({ ... })` is fully typed across tables and RPCs.
 
+Alternative: Exported generics from the server
+```ts
+// server/sync.types.ts (type-only helper)
+import type { schema } from './schema';
+import type { mutators } from './sync';
+
+export type AppTypes = {
+  Schema: typeof schema;
+  Mutators: typeof mutators; // or typeof sync.$mutators if preferred
+};
+```
+
+```ts
+// client.ts
+import type { AppTypes } from '../server/sync.types';
+import { createClient } from '@sync/client';
+
+export const client = createClient<AppTypes>({ baseURL: '/api/sync' });
+```
+Notes:
+- Uses types-only imports, so no server code is bundled.
+- You specify a single generic once; the rest of the client API is fully inferred.
+
 ```ts
 import { createClient } from '@sync/client';
 
