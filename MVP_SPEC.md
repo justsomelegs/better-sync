@@ -133,7 +133,7 @@ Auth: Out of scope for MVP. Request context passthrough supported (e.g., headers
 
 ## Client API (MVP)
 
-The client maintains a local optimistic cache by default. Writes apply immediately, then reconcile with server responses and SSE events. On error, the client auto-rolls back the local change.
+The client maintains a local optimistic cache by default with zero configuration. Writes apply immediately, then reconcile with server responses and SSE events. On error, the client auto-rolls back the local change. No developer code is required to enable or manage optimistic behavior.
 
 ```ts
 import { createClient } from '@sync/client';
@@ -144,6 +144,7 @@ export const client = createClient<typeof schema>({
   realtime: 'sse',       // default
   pollIntervalMs: 1500   // used only if SSE is unavailable
 });
+// Optimistic UI is ON by default; no configuration required.
 // RPC: call server mutators (typed)
 await client.rpc('addTodo', { title: 'Buy eggs' });
 await client.rpc('toggleAll', { done: true });
@@ -209,17 +210,17 @@ Subscription handle shape:
 
 ### Writes – `insert` / `update` / `delete`
 
-Writes accept an optional `clientOpId` for idempotency and clean reconciliation with optimistic state. The client generates these IDs automatically if omitted.
+Writes automatically include a client-generated operation ID for idempotency and clean reconciliation with optimistic state. No setup is required. You may optionally pass a `clientOpId` for correlation/debugging, but it is not needed for correctness.
 
 ```ts
 // Insert (returns inserted row(s)); server fills id and updatedAt
-const inserted = await client.todos.insert({ title: 'Buy milk', done: false }, { clientOpId: crypto.randomUUID() });
+const inserted = await client.todos.insert({ title: 'Buy milk', done: false });
 
 // Update by id
-const updated = await client.todos.update('t1', { done: true }, { clientOpId: crypto.randomUUID() });
+const updated = await client.todos.update('t1', { done: true });
 
 // Delete with rollback handled by the client if the server rejects the change
-await client.todos.delete('t1', { clientOpId: crypto.randomUUID() });
+await client.todos.delete('t1');
 
 // Update by where (client resolves PKs via select, then server updates by PK)
 const bulk = await client.todos.update(
@@ -242,12 +243,17 @@ Local-first optimistic writes (default):
 - On failure, the client automatically rolls back the local change.
 - Inserts use temporary IDs that are remapped to server-issued ULIDs upon acknowledgment.
 
-Example optimistic insert with temp ID remap (conceptual):
+Under the hood (conceptual, handled by the client library):
 ```ts
-const tempId = client.optimistic.tempId();
-client.optimistic.insert('todos', { id: tempId, title: 'Buy milk', done: false });
-const res = await client.todos.insert({ title: 'Buy milk', done: false });
-client.optimistic.reconcileId('todos', tempId, res.id);
+const opId = generateClientOperationId();
+const tempId = allocateTemporaryId();
+applyLocal({ table: 'todos', id: tempId, set: { title: 'Buy milk', done: false } });
+try {
+  const res = await postMutate({ opId, table: 'todos', set: { title: 'Buy milk', done: false } });
+  reconcile({ tempId, realId: res.id, version: res.version, updatedAt: res.updatedAt });
+} catch (e) {
+  rollback({ opId });
+}
 ```
 
 ### Upsert – `upsert`
