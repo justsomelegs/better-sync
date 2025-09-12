@@ -248,6 +248,13 @@ export const client = createClient({
   pollIntervalMs: 1500   // used only if SSE is unavailable
 });
 // Optimistic UI is ON by default; no configuration required.
+
+// Optional: choose a local datastore (no fallback)
+// Memory (zero deps, ephemeral)
+createClient({ baseURL: '/api/sync', datastore: memory() });
+
+// SQLite for web via absurd-sql (IndexedDB-backed), runs off the main thread
+createClient({ baseURL: '/api/sync', datastore: sqliteWeb({ driver: 'absurd-sql', worker: true }) });
 // RPC: call server mutators (typed)
 await client.rpc('addTodo', { title: 'Buy eggs' });
 await client.rpc('toggleAll', { done: true });
@@ -567,6 +574,13 @@ Diff semantics (MVP):
 - Idempotent operations: The client attaches a unique operation ID to each write. Retries don’t duplicate effects; the same result is returned.
 - Realtime via SSE: The server emits events with `eventId`, `txId`, `rowVersions`, and optional `diffs`. Clients resume on reconnect using `Last-Event-ID`.
 - Simple merges: Default row-level last-writer by `version`; optionally merge disjoint field updates when enabled per table.
+
+Client Datastores:
+- Pluggable local stores. Two first-class options in MVP:
+  - `memory()` – in-memory, ephemeral. Fastest startup, zero dependencies.
+  - `sqliteWeb({ driver: 'absurd-sql', worker: true })` – SQLite on the web via absurd-sql (IndexedDB-backed). No fallback; if initialization fails, it surfaces an error.
+- No automatic fallback between datastores to ensure predictable behavior.
+- Web default behavior: all datastore operations execute off the main thread (Web Worker) when `worker: true`.
 
 ---
 
