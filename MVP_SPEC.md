@@ -2,6 +2,44 @@
 
 This document codifies the agreed MVP goals, constraints, and API. It is the single source of truth for our initial release. Future agents should read this before implementing or proposing changes.
 
+### Quickstart (TL;DR)
+
+1) Define your schema
+```ts
+// schema.ts
+import { z } from 'zod';
+export const schema = {
+  todos: z.object({ id: z.string(), title: z.string(), done: z.boolean().default(false), updatedAt: z.number() })
+} as const;
+```
+
+2) Mount the server handler
+```ts
+// server.ts
+import { createSync } from '@sync/core';
+import { sqliteAdapter } from '@sync/adapter-sqlite';
+import { schema } from './schema';
+
+export const sync = createSync({ schema, storage: sqliteAdapter({ url: 'file:./app.db' }) });
+export const handler = sync.handler; // Mount in your framework
+```
+
+3) Use the client in your app
+```ts
+// client.ts
+import { createClient } from '@sync/client';
+import { schema } from './schema';
+export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
+
+// Optimistic by default
+await client.todos.insert({ title: 'Buy milk', done: false });
+
+// Live updates
+const sub = client.todos.watch({ where: ({ done }) => !done }, ({ data }) => render(data));
+```
+
+That’s it. No routing, no cache setup, no manual optimistic code.
+
 ### Vision
 - **Type-safe sync engine for TypeScript** with excellent DX, inspired by Better Auth’s extensibility and simplicity.
 - **Environment-agnostic**: serverless/ephemeral friendly, Node, edge runtimes, browsers.
@@ -29,6 +67,10 @@ This document codifies the agreed MVP goals, constraints, and API. It is the sin
 ---
 
 ## Schema Model (BYO)
+
+Core Concepts:
+- Plain object schema. Zod adds runtime validation; TS-only gives types without validation.
+- Defaults: `id` primary key, `updatedAt` timestamp; override per table if needed.
 - Single object keyed by collection/table name.
 - Accepts Zod/ArkType validators or TS-only types.
 - Defaults: `primaryKey = ['id']`, `updatedAt = 'updatedAt'`.
@@ -445,6 +487,35 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 - `txId`: Groups changes that committed together; clients can update atomically per transaction.
 - `rowVersions`: Per-row monotonic versions so clients only apply newer updates.
 - `diffs` (optional): Minimal changes for efficient cache updates. If absent or insufficient, the client reselects.
+
+---
+
+## Core Concepts (explained)
+
+- Local-first optimistic cache: The client applies writes immediately for instant UX, then reconciles with server state. On failure, changes auto-rollback. Inserts get a temporary ID remapped to the server-issued ULID.
+- Server-authoritative versions: The server assigns a monotonic `version` per row on commit. Clients accept only newer versions, eliminating clock-skew races.
+- Idempotent operations: The client attaches a unique operation ID to each write. Retries don’t duplicate effects; the same result is returned.
+- Realtime via SSE: The server emits events with `eventId`, `txId`, `rowVersions`, and optional `diffs`. Clients resume on reconnect using `Last-Event-ID`.
+- Simple merges: Default row-level last-writer by `version`; optionally merge disjoint field updates when enabled per table.
+
+---
+
+## FAQ
+
+Q: Do I need to configure optimistic updates?
+A: No. They’re on by default. The client handles temp IDs, reconcile, rollback, and idempotency for you.
+
+Q: What happens if the client disconnects?
+A: On reconnect, the client uses `Last-Event-ID` to resume from the server’s buffer. If events are missed beyond the buffer, it takes a fresh snapshot.
+
+Q: How do I run domain logic (validation/side-effects)?
+A: Define a server mutator with `defineMutators`. It runs in a transaction and emits standard SSE on success. Call it via `client.rpc(name, args)`.
+
+Q: Are external DB writes reflected?
+A: MVP only observes writes through our API. Post‑MVP we’ll add CDC/triggers to emit events for external writers.
+
+Q: Can I disable realtime?
+A: Yes. Set `realtime: 'off'` when creating the client; you can still call `select` and writes will work without subscriptions.
 - The client routes events to active subscriptions:
   - `watch(id, ...)`: if PK matches and `rowVersion` is newer than local, apply diff or re-fetch that row via `select(id)` if needed.
   - `watch(query, ...)`: if any table in event matches the watched table, apply diffs to the local window; if not enough info, re-run `select(query)`.
