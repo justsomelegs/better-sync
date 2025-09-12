@@ -1,0 +1,14 @@
+{
+  "name": "example-simple",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "@sync/core": "workspace:*",
+    "@sync/adapter-sqlite": "workspace:*",
+    "@sync/client": "workspace:*",
+    "zod": "^3.23.8"
+  }
+}
