@@ -186,6 +186,50 @@ Internalized routes (no configuration needed):
 - `POST   /select` – read endpoint
 - `POST   /mutators/:name` – invoke a registered server mutator
 
+Request/response shapes (for reference; client abstracts these):
+```http
+POST /mutate
+Content-Type: application/json
+{
+  "table": "todos",
+  "op": "update", // insert | update | delete | upsert
+  "pk": "t1",     // or object for composite
+  "set": { "done": true },
+  "ifVersion": 1012,           // optional compare-and-set
+  "clientOpId": "uuid-..."    // idempotency
+}
+
+200 OK
+{
+  "row": { "id": "t1", "done": true, "updatedAt": 1726..., "version": 1013 }
+}
+```
+
+```http
+POST /select
+Content-Type: application/json
+{
+  "table": "todos",
+  "where": null, // client-side predicate in code, server does windowing: select/orderBy/limit/cursor
+  "select": ["id","title","done","updatedAt"],
+  "orderBy": { "updatedAt": "desc" },
+  "limit": 50,
+  "cursor": null
+}
+
+200 OK
+{ "data": [ ... ], "nextCursor": "opaque" }
+```
+
+```http
+POST /mutators/addTodo
+Content-Type: application/json
+{ "args": { "title": "Buy milk" }, "clientOpId": "uuid-..." }
+
+200 OK
+{ "result": { "id": "t1", "title": "Buy milk", "done": false, "updatedAt": 1726..., "version": 1001 } }
+```
+
 Server behavior:
 - Generates IDs (ULID) if missing.
 - Sets `updatedAt` (ms) on each write; LWW conflict policy on `updatedAt` with deterministic tie-breaker on `id`.
@@ -330,6 +374,9 @@ const inserted = await client.todos.insert({ title: 'Buy milk', done: false });
 // Update by id
 const updated = await client.todos.update('t1', { done: true });
 
+// Conditional update (compare-and-set): only apply if current version matches
+await client.todos.update('t1', { done: true }, { ifVersion: 1012 });
+
 // Delete with rollback handled by the client if the server rejects the change
 await client.todos.delete('t1');
 
@@ -422,6 +469,19 @@ We use server-issued versions for causality-aware ordering. This avoids clock sk
 
 Versions storage (MVP):
 - Stored in an internal meta table (e.g., `_sync_versions(table, pk_hash, version)`), not embedded into user tables. A future option may allow embedding a `version` column.
+
+Per-table field-level merge (example):
+```ts
+import { z } from 'zod';
+export const schema = {
+  todos: {
+    primaryKey: ['id'],
+    updatedAt: 'updatedAt',
+    merge: ['title','done'], // disjoint field merges allowed
+    schema: z.object({ id: z.string(), title: z.string(), done: z.boolean(), updatedAt: z.number() })
+  }
+} as const;
+```
 
 ---
 
@@ -537,6 +597,15 @@ export const client = createClient({ baseURL: '/api/sync' });
   - `delete(id) -> { ok: true }`
   - `delete({ where }) -> { ok, failed, pks }`
 
+Conflict error (example):
+```json
+{
+  "code": "CONFLICT",
+  "message": "Version mismatch",
+  "details": { "expectedVersion": 1012, "actualVersion": 1013 }
+}
+```
+
 ### SSE Event Model (MVP)
 - Event is emitted after successful mutation commit. Each SSE message includes a monotonic `id` using the SSE `id:` field to enable resume.
 - Event payload (data field) example:
@@ -582,6 +651,15 @@ Client Datastores:
   - `absurd()` – SQLite on the web via absurd-sql (IndexedDB-backed). Runs off the main thread in browsers. No fallback; if initialization fails, it surfaces an error.
 - No automatic fallback between datastores to ensure predictable behavior.
 - Web default behavior: all datastore operations execute off the main thread (Web Worker). The `absurd` adapter is web-only (uses IndexedDB under the hood).
+
+Examples:
+```ts
+// Memory (no persistence)
+createClient({ baseURL: '/api/sync', datastore: memory() });
+
+// Web SQLite via absurd-sql (IndexedDB-backed), worker thread by default
+createClient({ baseURL: '/api/sync', datastore: absurd() });
+```
 
 ---
 
@@ -631,6 +709,21 @@ Database adapters MUST implement:
 - Windows: `selectWindow({ select, orderBy, limit, cursor })`
 - Batch variants for update/delete where applicable
 All write methods return authoritative `id`, `updatedAt`, and assigned `version`.
+
+Minimal memory adapter shape (illustrative):
+```ts
+export function memory() {
+  const db = new Map();
+  return {
+    async begin() {}, async commit() {}, async rollback() {},
+    async insert(table, row) { /* ... return row with id/updatedAt/version */ },
+    async updateByPk(table, pk, set) { /* ... */ },
+    async deleteByPk(table, pk) { /* ... */ },
+    async selectByPk(table, pk) { /* ... */ },
+    async selectWindow(query) { /* ... return { data, nextCursor } */ }
+  } as const;
+}
+```
 
 ### Conflict Errors
 - On version mismatch, server returns `CONFLICT` with details `{ expectedVersion, actualVersion }`.
