@@ -67,13 +67,13 @@ export interface ClientDatastore {
 }
 
 export type MutatorDef<Args, Result> = {
-  args: unknown;
+  args: { parse: (v: unknown) => Args } | unknown;
   handler(ctx: { db: DatabaseAdapter; ctx: Record<string, unknown> }, args: Args): Promise<Result>;
 };
 
 export type Mutators = Record<string, MutatorDef<any, any>>;
 
-import { SseRingBuffer, sseHeaders } from './sse.js';
+import { SseHub } from './sse.js';
 import { IdempotencyCache } from './idempotency.js';
 
 export function createSync(opts: {
@@ -81,34 +81,26 @@ export function createSync(opts: {
   database: DatabaseAdapter;
   mutators?: Mutators;
 }) {
-  const ring = new SseRingBuffer();
+  const hub = new SseHub();
   const idem = new IdempotencyCache<any>();
 
   async function handleEvents(req: Request): Promise<Response> {
     const last = req.headers.get('last-event-id') || undefined;
-    const stream = new ReadableStream({
-      start(controller) {
-        const headersText = `:` + 'keepalive' + `\n\n`;
-        controller.enqueue(new TextEncoder().encode(headersText));
-        const replay = ring.getSince(last);
-        for (const evt of replay) {
-          const frame = `id: ${evt.id}\n` + `event: mutation\n` + `data: ${evt.data}\n\n`;
-          controller.enqueue(new TextEncoder().encode(frame));
-        }
-        // No live push loop in MVP minimal impl; emitted via emitEvent helper
-      }
-    });
-    return new Response(stream, { headers: sseHeaders() });
+    return hub.subscribe(last || undefined);
   }
 
   function emitEvent(event: SseEvent) {
-    ring.push(event);
+    hub.broadcast(event);
   }
 
   async function handleSelect(req: Request): Promise<Response> {
-    const body = await req.json() as SelectRequest;
-    const { table, select, orderBy, limit, cursor } = body;
-    const res = await opts.database.selectWindow(table, { select, orderBy, limit, cursor, where: body.where });
+    const body = await req.json() as SelectRequest | ({ table: string; pk: PrimaryKey; select?: string[] });
+    if ((body as any).pk !== undefined) {
+      const one = await opts.database.selectByPk((body as any).table, (body as any).pk, (body as any).select);
+      return json({ data: one ? [one] : [], nextCursor: null });
+    }
+    const { table, select, orderBy, limit, cursor } = body as SelectRequest;
+    const res = await opts.database.selectWindow(table, { select, orderBy, limit, cursor, where: (body as SelectRequest).where });
     return json(res);
   }
 
@@ -170,13 +162,38 @@ export function createSync(opts: {
       return error({ code, message: e?.message || 'Internal error', details: e?.details });
     }
     if ((body as any).clientOpId) idem.set((body as any).clientOpId, response);
-    // Emit mutation event (minimal, per spec example)
+    // Emit mutation event (minimal); clients can reselect
     emitEvent({ eventId: '', txId: '', tables: [{ name: (body as any).table, type: 'mutation', pks: [], rowVersions: {}, diffs: {} }] });
     return json(response);
   }
 
-  async function handleMutators(_req: Request, _name: string): Promise<Response> {
-    return error({ code: 'BAD_REQUEST', message: 'Mutators not implemented in MVP cut' });
+  async function handleMutators(req: Request, name: string): Promise<Response> {
+    const m = opts.mutators?.[name];
+    if (!m) return error({ code: 'NOT_FOUND', message: 'Mutator not found' }, 404);
+    const body = await req.json() as { args: unknown; clientOpId?: string };
+    let parsedArgs: any = body.args;
+    if (m.args && typeof (m.args as any).parse === 'function') {
+      try {
+        parsedArgs = (m.args as any).parse(body.args);
+      } catch (e: any) {
+        return error({ code: 'BAD_REQUEST', message: 'Validation failed', details: e?.errors || String(e?.message || e) }, 400);
+      }
+    }
+    if (body.clientOpId) {
+      const prior = idem.get(body.clientOpId);
+      if (prior) return json({ result: prior });
+    }
+    await opts.database.begin();
+    try {
+      const result = await m.handler({ db: opts.database, ctx: {} }, parsedArgs);
+      await opts.database.commit();
+      idem.set(body.clientOpId || `mut:${name}:${Date.now()}`, result);
+      hub.broadcast({ eventId: '', txId: '', tables: [] });
+      return json({ result });
+    } catch (e: any) {
+      await opts.database.rollback();
+      return error({ code: e?.code || 'INTERNAL', message: e?.message || 'Internal error' }, 500);
+    }
   }
 
   async function router(req: Request): Promise<Response> {
