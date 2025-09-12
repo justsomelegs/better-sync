@@ -1,0 +1,30 @@
+{
+  "name": "just-sync",
+  "version": "0.0.0",
+  "private": false,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json",
+    "lint": "biome check ."
+  },
+  "peerDependencies": {
+    "typescript": ">=5.0.0"
+  },
+  "dependencies": {
+    "just-sync-core": "0.0.0",
+    "just-sync-client": "0.0.0",
+    "just-sync-adapter-sqlite": "0.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}
