@@ -28,8 +28,7 @@ export const handler = sync.handler; // Mount in your framework
 ```ts
 // client.ts
 import { createClient } from '@sync/client';
-import { schema } from './schema';
-export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
+export const client = createClient({ baseURL: '/api/sync' });
 
 // Optimistic by default
 await client.todos.insert({ title: 'Buy milk', done: false });
@@ -59,7 +58,7 @@ That’s it. No routing, no cache setup, no manual optimistic code.
 ## Architecture Snapshot (MVP)
 - **Server**: `createSync({ schema, database })` where database is a SQLite adapter. Server is authoritative for `id` and `updatedAt`.
 - **Transport**: Internally uses Better Call to expose `GET /events` (SSE), `POST /mutate`, `POST /select`. Developer mounts a single exported handler for their framework.
-- **Client**: `createClient<typeof schema>({ baseURL, realtime?: 'sse' | 'poll' | 'off', pollIntervalMs? })`. Defaults to SSE realtime; silently falls back to polling if needed.
+- **Client**: `createClient({ baseURL, realtime?: 'sse' | 'poll' | 'off', pollIntervalMs? })`. Defaults to SSE realtime; silently falls back to polling if needed.
 - **Client state**: Local-first optimistic cache applies writes immediately; reconciles on server acknowledgment; rolls back on error. Inserts use temporary IDs remapped to server ULIDs.
 - **Realtime resume**: SSE events include monotonic event IDs and support resuming via `Last-Event-ID` (or `?since=`). Server maintains a small in-memory ring buffer for gapless reconnects.
 - **Change propagation**: On successful server mutations (via our API), the server emits an SSE event. Subscribed clients refresh affected data immediately. No background scanners/triggers in MVP.
@@ -131,7 +130,29 @@ export const sync = createSync({
 // - version assignment and updatedAt stamping
 // - SSE event emission (with eventId, txId, rowVersions, and optional diffs)
 // - a unified handler interface (handler/fetch/next)
-// Optional: custom mutators (server-side functions)
+// Option A (recommended): define mutators in config
+export const sync = createSync({
+  schema,
+  database: sqliteAdapter({ url: 'file:./app.db' }),
+  mutators: {
+    addTodo: {
+      args: z.object({ title: z.string().min(1) }),
+      handler: async ({ db, ctx }, { title }) => {
+        const row = await db.insert('todos', { title, done: false });
+        return row;
+      }
+    },
+    toggleAll: {
+      args: z.object({ done: z.boolean() }),
+      handler: async ({ db }, { done }) => {
+        const { pks } = await db.updateWhere('todos', { set: { done } });
+        return { ok: true, count: pks.length };
+      }
+    }
+  }
+});
+
+// Option B (advanced): register mutators via method
 export const mutators = sync.defineMutators({
   addTodo: {
     args: z.object({ title: z.string().min(1) }),
@@ -177,11 +198,27 @@ Auth: Out of scope for MVP. Request context passthrough supported (e.g., headers
 
 The client maintains a local optimistic cache by default with zero configuration. Writes apply immediately, then reconcile with server responses and SSE events. On error, the client auto-rolls back the local change. No developer code is required to enable or manage optimistic behavior.
 
+### Typing & Inference (Better Auth-style)
+
+To get full IntelliSense without generics, add a tiny ambient file once:
+```ts
+// sync-env.d.ts (type-only; ensure tsconfig includes it)
+import type { schema } from './server/schema';
+import type { mutators } from './server/sync';
+
+declare module '@sync/client' {
+  interface AppTypes {
+    Schema: typeof schema;
+    Mutators: typeof mutators;
+  }
+}
+```
+After this, `createClient({ ... })` is fully typed across tables and RPCs.
+
 ```ts
 import { createClient } from '@sync/client';
-import { schema } from './schema';
 
-export const client = createClient<typeof schema>({
+export const client = createClient({
   baseURL: '/api/sync',
   realtime: 'sse',       // default
   pollIntervalMs: 1500   // used only if SSE is unavailable
@@ -377,9 +414,7 @@ Standard JSON error shape:
 ```ts
 // lib/syncClient.ts
 import { createClient } from '@sync/client';
-import { schema } from '../schema';
-
-export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
+export const client = createClient({ baseURL: '/api/sync' });
 ```
 
 ```svelte
@@ -417,7 +452,7 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 ## MVP Checklist
 - Schema: single plain object; Zod/ArkType/TS-only supported; inline overrides per table.
 - Server: `createSync`; SQLite adapter; internal routes `/events`, `/mutate`, `/select`; SSE default.
-- Client: `createClient<typeof schema>`; SSE default with HTTP fallback; `.close()`.
+- Client: `createClient`; SSE default with HTTP fallback; `.close()`.
 - Reads: `select(id|query)` with `{ where, select, orderBy, limit, cursor }` (predicate runs client-side in MVP).
 - Subs: `watch(id|query, cb, opts?)` unified API.
 - Writes: `insert`, `update(id|where)`, `delete(id|where)`; server authoritative; emits SSE on success.
