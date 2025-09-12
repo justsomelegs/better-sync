@@ -184,7 +184,7 @@ Internalized routes (no configuration needed):
 - `GET    /events` – SSE stream (default realtime channel)
 - `POST   /mutate` – unified insert/update/delete endpoint
 - `POST   /select` – read endpoint
-- `POST   /rpc/:name` – invoke a registered server mutator
+- `POST   /mutators/:name` – invoke a registered server mutator
 
 Server behavior:
 - Generates IDs (ULID) if missing.
@@ -255,9 +255,10 @@ createClient({ baseURL: '/api/sync', datastore: memory() });
 
 // SQLite for web via absurd-sql (IndexedDB-backed), runs off the main thread (Web-only adapter)
 createClient({ baseURL: '/api/sync', datastore: absurd() });
-// RPC: call server mutators (typed)
-await client.rpc('addTodo', { title: 'Buy eggs' });
-await client.rpc('toggleAll', { done: true });
+// Mutators: typed and dynamic
+await client.mutators.addTodo({ title: 'Buy eggs' });
+await client.mutators.toggleAll({ done: true });
+await client.mutators.call('addTodo', { title: 'Milk' }); // dynamic escape hatch
 
 // Reads and subscriptions automatically stay fresh as mutations land, thanks to SSE.
 
@@ -593,7 +594,7 @@ Q: What happens if the client disconnects?
 A: On reconnect, the client uses `Last-Event-ID` to resume from the server’s buffer. If events are missed beyond the buffer, it takes a fresh snapshot.
 
 Q: How do I run domain logic (validation/side-effects)?
-A: Define a server mutator with `defineMutators`. It runs in a transaction and emits standard SSE on success. Call it via `client.rpc(name, args)`.
+A: Define a server mutator with `defineMutators`. It runs in a transaction and emits standard SSE on success. Call it via `client.mutators.addTodo(args)` or `client.mutators.call(name, args)` dynamically.
 
 Q: Are external DB writes reflected?
 A: MVP only observes writes through our API. Post‑MVP we’ll add CDC/triggers to emit events for external writers.
