@@ -184,6 +184,7 @@ Internalized routes (no configuration needed):
 - `GET    /events` – SSE stream (default realtime channel)
 - `POST   /mutate` – unified insert/update/delete endpoint
 - `POST   /select` – read endpoint
+- `POST   /rpc/:name` – invoke a registered server mutator
 
 Server behavior:
 - Generates IDs (ULID) if missing.
@@ -386,11 +387,15 @@ Semantics:
 
 ## Realtime Semantics
 
-SSE is the default realtime channel. Each event has a monotonic `id` and the server keeps a small ring buffer so clients can resume without a full snapshot after brief disconnects.
+SSE is the default realtime channel. Each event has a monotonic `id` (ULID) and the server keeps a small ring buffer so clients can resume without a full snapshot after brief disconnects.
 - **Default**: SSE for push notifications on successful server-side mutations, with event IDs and resume support.
 - **Resume**: Clients include `Last-Event-ID` (or `?since=`) on reconnect to receive any missed events from a small server-side buffer; if the buffer cannot satisfy, the client performs a fresh snapshot.
 - **Fallback**: If SSE is unsupported, client falls back to periodic HTTP polling (interval configurable). When events are received, matching `watch` subscriptions refresh their data.
 - **External DB writes** (not via our API): Not observed in MVP. Post-MVP will add DB triggers/CDC/scanners.
+
+Defaults:
+- SSE `id` format: ULID (monotonic where supported). `eventId` mirrors SSE `id`.
+- Ring buffer: retains up to 60 seconds of recent events or the last 10,000 events (whichever smaller). Configurable.
 
 ---
 
@@ -406,6 +411,9 @@ We use server-issued versions for causality-aware ordering. This avoids clock sk
   - Default remains row-level last-writer-wins by `version` (server sequence), removing reliance on clock timestamps.
   - Optional per-table field-level merge: specify `merge: ['fieldA','fieldB']` to merge disjoint field updates when concurrent.
 - Server validates rows if a validator is provided (Zod/ArkType). TS-only skips runtime validation.
+
+Versions storage (MVP):
+- Stored in an internal meta table (e.g., `_sync_versions(table, pk_hash, version)`), not embedded into user tables. A future option may allow embedding a `version` column.
 
 ---
 
@@ -510,7 +518,7 @@ export const client = createClient({ baseURL: '/api/sync' });
 
 ### Mutation Semantics & Idempotency
 - Mutations are transactional; server sets/normalizes `id` (ULID if missing), assigns a monotonic `version`, and updates `updatedAt` (ms) before commit.
-- Idempotency: clients send `clientOpId` (and/or `Idempotency-Key`) on `insert/update/delete`; the server dedupes repeated attempts and returns the same result.
+- Idempotency: clients send `clientOpId` (and/or `Idempotency-Key`) on `insert/update/delete`; the server dedupes repeated attempts and returns the same result. Default dedupe window is 10 minutes (configurable).
 - Bulk update/delete by `where` is resolved client-side by first selecting PKs, then performing batch operations by PK on the server.
 - Per-row outcomes for bulk operations:
   - `{ ok: number, failed: Array<{ pk: PK, error: { code: string, message: string } }>, pks: Array<PK> }`
@@ -545,6 +553,10 @@ export const client = createClient({ baseURL: '/api/sync' });
 - `txId`: Groups changes that committed together; clients can update atomically per transaction.
 - `rowVersions`: Per-row monotonic versions so clients only apply newer updates.
 - `diffs` (optional): Minimal changes for efficient cache updates. If absent or insufficient, the client reselects.
+
+Diff semantics (MVP):
+- Shallow top-level fields only. Arrays replace wholesale.
+- If a change cannot be expressed as a shallow diff, `diffs` is omitted for that row and clients reselect.
 
 ---
 
@@ -596,6 +608,17 @@ A: Yes. Set `realtime: 'off'` when creating the client; you can still call `sele
 - Max payload size (request/response): 1 MB default (configurable per framework/environment).
 - Max batch size for mutations: 100 rows (excess rejected with `BAD_REQUEST`).
 - Timeouts: server handlers target 10 s default per request.
+
+### Adapter Interface (MVP)
+Database adapters MUST implement:
+- Transactions: `begin()`, `commit()`, `rollback()`
+- Row ops: `insert`, `updateByPk`, `deleteByPk`, `selectByPk`
+- Windows: `selectWindow({ select, orderBy, limit, cursor })`
+- Batch variants for update/delete where applicable
+All write methods return authoritative `id`, `updatedAt`, and assigned `version`.
+
+### Conflict Errors
+- On version mismatch, server returns `CONFLICT` with details `{ expectedVersion, actualVersion }`.
 
 ### Database Responsibilities (MVP)
 - The library does not modify DB settings (e.g., WAL) or create indexes automatically.
