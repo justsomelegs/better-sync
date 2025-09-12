@@ -489,6 +489,16 @@ export const schema = {
 Standard JSON error shape:
 - `{ code: 'BAD_REQUEST' | 'UNAUTHORIZED' | 'NOT_FOUND' | 'CONFLICT' | 'INTERNAL', message: string, details?: unknown }`
 
+Error codes reference:
+
+| Code          | When it occurs                                      | details example |
+|---------------|------------------------------------------------------|-----------------|
+| BAD_REQUEST   | Validation fails, payload malformed, limit exceeded  | { field: 'title', reason: 'min:1' } |
+| UNAUTHORIZED  | Auth required but missing/invalid (post‑MVP)         | { reason: 'missing token' } |
+| NOT_FOUND     | PK not found on update/delete/selectByPk             | { pk: 't1' } |
+| CONFLICT      | Version mismatch or unique constraint violation      | { expectedVersion, actualVersion } |
+| INTERNAL      | Unhandled errors                                     | { requestId: '...' } |
+
 ---
 
 ## Extensibility & Internals (MVP boundaries)
@@ -853,5 +863,30 @@ createSync({
     addTodo: { args: z.object({ title: z.string() }), handler: async ({ db }, { title }) => db.insert('todos', { title, done: false }) }
   }
 });
+```
+
+---
+
+## End-to-End Flow (Optimistic Write to Realtime Update)
+
+1) Client issues `insert` (optimistic):
+   - Generate `clientOpId` and temp `id`.
+   - Apply local diff to datastore.
+2) Server processes `/mutate`:
+   - Begin tx → assign `id` (if missing), `updatedAt`, `version` → commit.
+   - Emit SSE with `eventId`, `txId`, `rowVersions`, optional `diffs`.
+3) Client receives 200 response:
+   - Reconcile temp ID to real ID; ensure local version matches.
+4) Client receives SSE event:
+   - If newer `rowVersion`, apply diff or select row; update all subscriptions.
+5) On disconnect:
+   - Client reconnects with `Last-Event-ID`. If buffer miss, run fresh snapshot.
+
+Sequence (text diagram):
+```
+App UI → client.insert → local apply (opId,tempId)
+        → POST /mutate(opId) → Server tx (id,updatedAt,version) → commit
+        ← 200 {row}                      → SSE: id:eventId\ndata:{...}
+App UI ← reconcile(tempId→id,version)    ← apply event (diff/version)
 ```
 
