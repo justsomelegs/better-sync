@@ -253,8 +253,8 @@ export const client = createClient({
 // Memory (zero deps, ephemeral)
 createClient({ baseURL: '/api/sync', datastore: memory() });
 
-// SQLite for web via absurd-sql (IndexedDB-backed), runs off the main thread
-createClient({ baseURL: '/api/sync', datastore: absurd({ worker: true }) });
+// SQLite for web via absurd-sql (IndexedDB-backed), runs off the main thread (Web-only adapter)
+createClient({ baseURL: '/api/sync', datastore: absurd() });
 // RPC: call server mutators (typed)
 await client.rpc('addTodo', { title: 'Buy eggs' });
 await client.rpc('toggleAll', { done: true });
@@ -578,9 +578,9 @@ Diff semantics (MVP):
 Client Datastores:
 - Pluggable local stores. Two first-class options in MVP:
   - `memory()` – in-memory, ephemeral. Fastest startup, zero dependencies.
-  - `absurd({ worker: true })` – SQLite on the web via absurd-sql (IndexedDB-backed). No fallback; if initialization fails, it surfaces an error.
+  - `absurd()` – SQLite on the web via absurd-sql (IndexedDB-backed). Runs off the main thread in browsers. No fallback; if initialization fails, it surfaces an error.
 - No automatic fallback between datastores to ensure predictable behavior.
-- Web default behavior: all datastore operations execute off the main thread (Web Worker) when `worker: true`.
+- Web default behavior: all datastore operations execute off the main thread (Web Worker). The `absurd` adapter is web-only (uses IndexedDB under the hood).
 
 ---
 
