@@ -82,6 +82,23 @@ export const sync = createSync({
   schema,
   storage: sqliteAdapter({ url: 'file:./app.db' })
 });
+// Optional: custom mutators (server-side functions)
+export const mutators = sync.defineMutators({
+  addTodo: {
+    args: z.object({ title: z.string().min(1) }),
+    handler: async ({ db, ctx }, { title }) => {
+      const row = await db.insert('todos', { title, done: false });
+      return row;
+    }
+  },
+  toggleAll: {
+    args: z.object({ done: z.boolean() }),
+    handler: async ({ db }, { done }) => {
+      const { pks } = await db.updateWhere('todos', { set: { done } });
+      return { ok: true, count: pks.length };
+    }
+  }
+});
 
 // Framework mounting (examples)
 export const handler = sync.handler;      // Express/Hono style
@@ -99,7 +116,7 @@ Server behavior:
 - Sets `updatedAt` (ms) on each write; LWW conflict policy on `updatedAt` with deterministic tie-breaker on `id`.
 - Emits SSE events after successful writes.
 
-Auth: Out of scope for MVP. To be added later (headers/callbacks) without breaking API.
+Auth: Out of scope for MVP. Request context passthrough supported (e.g., headers → `ctx`), enforcement to be added later without breaking API.
 
 ---
 
@@ -114,6 +131,9 @@ export const client = createClient<typeof schema>({
   realtime: 'sse',       // default
   pollIntervalMs: 1500   // used only if SSE is unavailable
 });
+// RPC: call server mutators (typed)
+await client.rpc('addTodo', { title: 'Buy eggs' });
+await client.rpc('toggleAll', { done: true });
 
 // Optional teardown
 // client.close();
@@ -176,10 +196,10 @@ Subscription handle shape:
 
 ```ts
 // Insert (returns inserted row(s)); server fills id and updatedAt
-const inserted = await client.todos.insert({ title: 'Buy milk', done: false });
+const inserted = await client.todos.insert({ title: 'Buy milk', done: false }, { clientOpId: crypto.randomUUID() });
 
 // Update by id
-const updated = await client.todos.update('t1', { done: true });
+const updated = await client.todos.update('t1', { done: true }, { clientOpId: crypto.randomUUID() });
 
 // Update by where (client resolves PKs via select, then server updates by PK)
 const bulk = await client.todos.update(
@@ -237,8 +257,14 @@ Semantics:
 ---
 
 ## Consistency & Conflicts
-- Server is authoritative for `id` and `updatedAt`.
-- Conflict resolution: **LWW** on `updatedAt`, tie-breaker by `id`.
+- **Server is authoritative** for canonical state and sequencing. Clients reconcile to server-emitted versions.
+- **Causality-aware versions**:
+  - Each row maintains a server-issued monotonic `version` (e.g., per-table sequence or ULID ordered by time) in addition to `updatedAt`.
+  - Writes carry an optional `clientOpId` for idempotency; server dedupes and assigns the next `version`.
+  - SSE events include `{ table, pks, rowVersions }` so clients can apply only-newer changes in-order.
+- **Conflict resolution**:
+  - Default remains row-level last-writer-wins by `version` (server sequence), removing reliance on clock timestamps.
+  - Optional per-table field-level merge: specify `merge: ['fieldA','fieldB']` to merge disjoint field updates when concurrent.
 - Server validates rows if a validator is provided (Zod/ArkType). TS-only skips runtime validation.
 
 ---
@@ -345,8 +371,8 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 - `select` narrows fields and types; unspecified implies full row.
 
 ### Mutation Semantics & Idempotency
-- Mutations are transactional; server sets/normalizes `id` (ULID if missing) and `updatedAt` (ms) before commit.
-- Optional idempotency: clients may send `Idempotency-Key` header on `insert/update/delete` to dedupe accidental retries (MVP support is best-effort; duplicates are rare with ULIDs).
+- Mutations are transactional; server sets/normalizes `id` (ULID if missing), assigns a monotonic `version`, and updates `updatedAt` (ms) before commit.
+- Idempotency: clients send `clientOpId` (and/or `Idempotency-Key`) on `insert/update/delete`; the server dedupes repeated attempts and returns the same result.
 - Bulk update/delete by `where` is resolved client-side by first selecting PKs, then performing batch operations by PK on the server.
 - Per-row outcomes for bulk operations:
   - `{ ok: number, failed: Array<{ pk: PK, error: { code: string, message: string } }>, pks: Array<PK> }`
@@ -359,15 +385,29 @@ export const client = createClient<typeof schema>({ baseURL: '/api/sync' });
 
 ### SSE Event Model (MVP)
 - Event is emitted after successful mutation commit. Each SSE message includes a monotonic `id` using the SSE `id:` field to enable resume.
-  Event payload (data field) example:
+- Event payload (data field) example:
 ```json
-{ "tables": [{ "name": "todos", "pks": ["t1","t2"], "type": "mutation" }] }
+{
+  "eventId": "1726080000123-42",
+  "txId": "1726080000123-7",
+  "tables": [
+    {
+      "name": "todos",
+      "type": "mutation",
+      "pks": ["t1","t2"],
+      "rowVersions": { "t1": 1012, "t2": 1013 },
+      "diffs": {
+        "t1": { "set": { "done": true }, "unset": [] }
+      }
+    }
+  ]
+}
 ```
 - The client routes events to active subscriptions:
-  - `watch(id, ...)`: if PK matches, re-fetch that row via `select(id)` and emit callback.
-  - `watch(query, ...)`: if any table in event matches the watched table, re-run `select(query)` to recompute the snapshot/window.
+  - `watch(id, ...)`: if PK matches and `rowVersion` is newer than local, apply diff or re-fetch that row via `select(id)` if needed.
+  - `watch(query, ...)`: if any table in event matches the watched table, apply diffs to the local window; if not enough info, re-run `select(query)`.
 - Reconnection:
-  - On SSE disconnect, client enters `retrying` with exponential backoff (base 500 ms, max 5 s), then resubscribes with `Last-Event-ID` to resume from the last processed event.
+  - On SSE disconnect, client enters `retrying` and resubscribes with `Last-Event-ID` to resume from the last processed event.
   - If the server-side buffer cannot replay the requested range, the client performs a fresh snapshot to avoid misses.
 - Poll fallback:
   - If SSE is unavailable, client polls `select(query)` on an interval (default 1500 ms) for active `watch`es.
