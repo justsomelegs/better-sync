@@ -451,6 +451,16 @@ SSE is the default realtime channel. Each event has a monotonic `id` (ULID) and 
 Defaults:
 - SSE `id` format: ULID (monotonic where supported). `eventId` mirrors SSE `id`.
 - Ring buffer: retains up to 60 seconds of recent events or the last 10,000 events (whichever smaller). Configurable.
+- Heartbeat: send comment `:keepalive` every 15s.
+- Retry: do not send `retry:`; client uses exponential backoff (base 500 ms, max 5 s).
+  Example SSE frames:
+  ```
+  id: 01J9Y0C8WEN8G2YCP0QWQFQ8R9
+  event: mutation
+  data: {"eventId":"01J9Y0C8WEN8G2YCP0QWQFQ8R9","txId":"01J9Y0C8WF7N6...","tables":[{"name":"todos","type":"mutation","pks":["t1"],"rowVersions":{"t1":1013},"diffs":{"t1":{"set":{"done":true},"unset":[]}}}]}
+
+  :keepalive
+  ```
 
 ---
 
@@ -469,6 +479,11 @@ We use server-issued versions for causality-aware ordering. This avoids clock sk
 
 Versions storage (MVP):
 - Stored in an internal meta table (e.g., `_sync_versions(table, pk_hash, version)`), not embedded into user tables. A future option may allow embedding a `version` column.
+
+Row versions & IDs:
+- `version`: integer per table, starts at 1 for first insert, increments by 1 per row update/upsert; insert sets version=1.
+- Overflow: JavaScript safe up to 2^53-1; practically unreachable in MVP; if exceeded, respond `INTERNAL`.
+- `eventId`: ULID in monotonic mode; assumes single-process for ordering (no distributed clock). Clustered ordering is post‑MVP.
 
 Per-table field-level merge (example):
 ```ts
@@ -616,6 +631,10 @@ Conflict error (example):
 }
 ```
 
+Idempotency scope:
+- Key: `{ clientOpId }` (optional `{ clientId }` may be added later). Dedupe TTL: 10 minutes; stored in-memory for MVP (lost on restart).
+- If duplicate payload differs, return first successful response and include `{ duplicated: true }` in `details`.
+
 ### SSE Event Model (MVP)
 - Event is emitted after successful mutation commit. Each SSE message includes a monotonic `id` using the SSE `id:` field to enable resume.
 - Event payload (data field) example:
@@ -645,6 +664,10 @@ Diff semantics (MVP):
 - Shallow top-level fields only. Arrays replace wholesale.
 - If a change cannot be expressed as a shallow diff, `diffs` is omitted for that row and clients reselect.
 
+Composite PK canonicalization:
+- Canonical PK string used in `rowVersions`/`diffs` maps is constructed by the declared `primaryKey` order.
+- Example: `primaryKey: ['workspaceId','id']`, pk `{ workspaceId: 'w1', id: 't1' }` → canonical `"workspaceId=w1|id=t1"`.
+
 ---
 
 ## Core Concepts (explained)
@@ -670,6 +693,10 @@ createClient({ baseURL: '/api/sync', datastore: memory() });
 // Web SQLite via absurd-sql (IndexedDB-backed), worker thread by default
 createClient({ baseURL: '/api/sync', datastore: absurd() });
 ```
+
+Client datastore contract:
+- Threading: on web, runs in a Worker; communication via postMessage; operations must not block main thread.
+- Apply vs reconcile: `apply` may stage optimistic state; `reconcile` must accept newer `version` and overwrite; older versions are ignored.
 
 ---
 
@@ -734,6 +761,16 @@ export function memory() {
   } as const;
 }
 ```
+
+Database adapter contract details:
+- Transaction nesting: calling `begin` while a transaction is active must throw `INTERNAL` in MVP (no nested tx support).
+- Error mapping: translate DB constraint violations to `CONFLICT`; input issues to `BAD_REQUEST`; unexpected to `INTERNAL`.
+- `selectWindow`: must return rows in the declared `orderBy`; `nextCursor` encodes the last row’s ordering keys.
+
+Cursor design:
+- Encoding: base64 of JSON `{ table, orderBy, last: { keys: Record<string, string|number>, id: string } }`.
+- Stability: valid only for same `{ table, orderBy }`; changing order or where invalidates the cursor.
+- Tie-breakers: always include `id` as final tie-breaker after `updatedAt` and `version`.
 
 ### Conflict Errors
 - On version mismatch, server returns `CONFLICT` with details `{ expectedVersion, actualVersion }`.
@@ -864,6 +901,12 @@ createSync({
   }
 });
 ```
+
+Mutators endpoint and validation:
+- Route: `POST /mutators/:name`
+- Request: `{ args: unknown, clientOpId?: string }` with `Content-Type: application/json`
+- Response: `{ result: unknown }` or error with standard shape.
+- Validation failures map to `BAD_REQUEST` with per-field details when available.
 
 ---
 
