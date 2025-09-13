@@ -1,0 +1,16 @@
+{
+  "name": "example-simple",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node dist/server.js"
+  },
+  "dependencies": {
+    "@sync/adapter-sqlite": "0.1.0",
+    "@sync/client": "0.1.0",
+    "@sync/core": "0.1.0",
+    "zod": "^3.23.8"
+  }
+}
