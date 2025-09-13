@@ -16,8 +16,8 @@ export const schema = {
 2) Mount the server handler
 ```ts
 // server.ts
-import { createSync } from '@sync/core';
-import { sqliteAdapter } from '@sync/adapter-sqlite';
+import { createSync } from 'just-sync';
+import { sqliteAdapter } from 'just-sync/storage/server';
 import { schema } from './schema';
 
 export const sync = createSync({ schema, database: sqliteAdapter({ url: 'file:./app.db' }) });
@@ -27,7 +27,7 @@ export const handler = sync.handler; // Mount in your framework
 3) Use the client in your app
 ```ts
 // client.ts
-import { createClient } from '@sync/client';
+import { createClient } from 'just-sync';
 export const client = createClient({ baseURL: '/api/sync' });
 
 // Optimistic by default
@@ -51,7 +51,7 @@ That’s it. No routing, no cache setup, no manual optimistic code.
 - No DB triggers or CDC/scanning for external writers. MVP observes only writes performed through our API.
 - No auth/authorize pipeline in MVP (will be added later without breaking API).
 - No query DSL or server-side filter push-down beyond basic shapes (predicate runs client-side in MVP).
-- No CLI/codegen. No additional ORMs beyond schema compatibility.
+- No additional ORMs beyond schema compatibility.
 
 ---
 
@@ -117,8 +117,8 @@ Notes:
 This section shows how to stand up the server, define custom mutators (server functions), and how request context flows into handlers. The server is authoritative for IDs, versions, and timestamps.
 
 ```ts
-import { createSync } from '@sync/core';
-import { sqliteAdapter } from '@sync/adapter-sqlite';
+import { createSync } from 'just-sync';
+import { sqliteAdapter } from 'just-sync/storage/server';
 import { schema } from './schema';
 
 export const sync = createSync({
@@ -175,9 +175,11 @@ export const mutators = sync.defineMutators({
 // - Mutators run inside a server transaction; on success, standard SSE events emit and clients reconcile.
 
 // Framework mounting (examples)
-export const handler = sync.handler;      // Express/Hono style
-export const fetch = sync.fetch;          // (req: Request) => Promise<Response>
-export const next = sync.nextHandlers();  // { GET, POST } for Next.js route handlers
+export const handler = sync.handler;          // Express/Hono style
+export const fetch = sync.fetch;              // (req: Request) => Promise<Response>
+// Next.js (route handlers)
+import { toNextJsHandler } from 'just-sync/next-js';
+export const { GET, POST } = toNextJsHandler(sync.handler);
 ```
 
 Internalized routes (no configuration needed):
@@ -231,7 +233,10 @@ Content-Type: application/json
 ```
 
 Server behavior:
-- Generates IDs (ULID) if missing.
+- IDs: Server is authoritative and serverless-friendly.
+  - Generates ULIDs for inserted rows. Client-provided ids are always replaced by server-issued ULIDs for scalar PK tables.
+  - Responses include `{ tempId, id }` mapping when a temporary client id was used so the client can reconcile.
+  - Composite PKs are allowed per table config and are always accepted as provided.
 - Sets `updatedAt` (ms) on each write; LWW conflict policy on `updatedAt` with deterministic tie-breaker on `id`.
 - Emits SSE events after successful writes.
 
@@ -251,7 +256,7 @@ To get full IntelliSense without generics, add a tiny ambient file once:
 import type { schema } from './server/schema';
 import type { mutators } from './server/sync';
 
-declare module '@sync/client' {
+declare module 'just-sync' {
   interface AppTypes {
     Schema: typeof schema;
     Mutators: typeof mutators;
@@ -275,7 +280,7 @@ export type AppTypes = {
 ```ts
 // client.ts
 import type { AppTypes } from '../server/sync.types';
-import { createClient } from '@sync/client';
+import { createClient } from 'just-sync';
 
 export const client = createClient<AppTypes>({ baseURL: '/api/sync' });
 ```
@@ -284,7 +289,7 @@ Notes:
 - You specify a single generic once; the rest of the client API is fully inferred.
 
 ```ts
-import { createClient } from '@sync/client';
+import { createClient } from 'just-sync';
 
 export const client = createClient({
   baseURL: '/api/sync',
@@ -297,7 +302,7 @@ export const client = createClient({
 // Memory (zero deps, ephemeral)
 createClient({ baseURL: '/api/sync', datastore: memory() });
 
-// SQLite for web via absurd-sql (IndexedDB-backed), runs off the main thread (Web-only adapter)
+// Web SQLite via absurd-sql (IndexedDB-backed), worker thread by default
 createClient({ baseURL: '/api/sync', datastore: absurd() });
 // Mutators: typed and dynamic
 await client.mutators.addTodo({ title: 'Buy eggs' });
@@ -435,7 +440,7 @@ const up2 = await client.todos.upsert(
 
 Semantics:
 - Conflict target defaults to primary key.
-- On conflict: merge fields (default: all input fields except id/updatedAt) or as specified by `merge`.
+- On conflict: default merges all provided fields except `id` and `updatedAt`; unspecified fields remain unchanged. To restrict, pass `merge: string[]`. `merge: []` performs no update on conflict (insert-only behavior).
 - Returns the upserted row(s). Server sets/updates `updatedAt`.
 
 ---
@@ -451,7 +456,7 @@ SSE is the default realtime channel. Each event has a monotonic `id` (ULID) and 
 Defaults:
 - SSE `id` format: ULID (monotonic where supported). `eventId` mirrors SSE `id`.
 - Ring buffer: retains up to 60 seconds of recent events or the last 10,000 events (whichever smaller). Configurable.
-- Heartbeat: send comment `:keepalive` every 15s.
+- Heartbeat: send comment `:keepalive` every 15s (configurable).
 - Retry: do not send `retry:`; client uses exponential backoff (base 500 ms, max 5 s).
   Example SSE frames:
   ```
@@ -478,12 +483,13 @@ We use server-issued versions for causality-aware ordering. This avoids clock sk
 - Server validates rows if a validator is provided (Zod/ArkType). TS-only skips runtime validation.
 
 Versions storage (MVP):
-- Stored in an internal meta table (e.g., `_sync_versions(table, pk_hash, version)`), not embedded into user tables. A future option may allow embedding a `version` column.
+- Stored in an internal meta table `_sync_versions(table_name, pk_canonical, version)`, not embedded into user tables. A future option may allow embedding a `version` column.
 
 Row versions & IDs:
 - `version`: integer per table, starts at 1 for first insert, increments by 1 per row update/upsert; insert sets version=1.
 - Overflow: JavaScript safe up to 2^53-1; practically unreachable in MVP; if exceeded, respond `INTERNAL`.
 - `eventId`: ULID in monotonic mode; assumes single-process for ordering (no distributed clock). Clustered ordering is post‑MVP.
+- `id` policy: ULID preferred for server-generated scalar PKs; client-provided `id` must be a valid ULID to be honored.
 
 Per-table field-level merge (example):
 ```ts
@@ -521,6 +527,18 @@ Error codes reference:
 - **Plugins**: Hook system designed but not exposed in MVP; default behavior baked in.
 - **Database adapters**: SQLite adapter only in MVP. Post-MVP: Drizzle adapters and additional databases (Postgres, D1/libsql, DynamoDB, etc.).
 
+### Package & Export Layout (MVP)
+- Package name: `just-sync`
+- Module format: ESM-only (`"type": "module"`), with Node export maps and subpath exports.
+- Primary exports:
+  - Server core: `import { createSync } from 'just-sync'`
+  - Client core: `import { createClient } from 'just-sync'`
+- Subpath exports:
+  - Server storage adapters: `import { sqliteAdapter } from 'just-sync/storage/server'`
+  - Client datastores: `import { memory, absurd } from 'just-sync/storage/client'`
+- Type augmentation target: `declare module 'just-sync' { interface AppTypes { ... } }`
+ - Next.js integration: `import { toNextJsHandler } from 'just-sync/next-js'` then `export const { GET, POST } = toNextJsHandler(sync.handler)`
+
 ---
 
 ## Post-MVP Roadmap (high level)
@@ -528,7 +546,7 @@ Error codes reference:
 - Server-side filter push-down and query planner; richer query builder.
 - Authentication/authorization hooks (headers → user context → policy).
 - Additional adapters (Postgres with LISTEN/NOTIFY, libsql/D1, Redis pubsub notifier).
-- CLI/codegen (optional) to generate types, handlers, and project scaffolding.
+- Additional codegen (optional) to generate types, handlers, and project scaffolding.
 - WebSocket/SSE multiplexing for advanced realtime; presence and backpressure handling.
 
 ---
@@ -537,7 +555,7 @@ Error codes reference:
 
 ```ts
 // lib/syncClient.ts
-import { createClient } from '@sync/client';
+import { createClient } from 'just-sync';
 export const client = createClient({ baseURL: '/api/sync' });
 ```
 
@@ -581,7 +599,8 @@ export const client = createClient({ baseURL: '/api/sync' });
 - Subs: `watch(id|query, cb, opts?)` unified API.
 - Writes: `insert`, `update(id|where)`, `delete(id|where)`; server authoritative; emits SSE on success.
 - Errors: standardized JSON codes.
-- Out-of-scope: auth, external write capture, CLI, advanced queries.
+- CLI: opt-in schema generation; generates DDL/migrations; user applies with their tooling.
+- Out-of-scope: auth, external write capture, advanced queries.
 
 ---
 
@@ -589,7 +608,8 @@ export const client = createClient({ baseURL: '/api/sync' });
 
 ### Runtime & Compatibility
 - Server runtime target: Node.js 18+ (Bun compatible), not Edge in MVP (due to SQLite driver).
-- Client: ESM-first, works in browsers and Node (SSR safe). SSE via `EventSource` in browsers; fetch-based stream on Node.
+- Client: ESM-only, works in browsers and Node (SSR safe). SSE via `EventSource` in browsers; fetch-based stream on Node.
+- Packages ship ESM-only with `"type": "module"` and export maps; no CJS builds.
 - CORS: same-origin by default; cross-origin allowed if server/framework enables it (not configured by this library in MVP).
 
 ### Composite Primary Keys
@@ -612,6 +632,7 @@ export const client = createClient({ baseURL: '/api/sync' });
 ### Mutation Semantics & Idempotency
 - Mutations are transactional; server sets/normalizes `id` (ULID if missing), assigns a monotonic `version`, and updates `updatedAt` (ms) before commit.
 - Idempotency: clients send `clientOpId` (and/or `Idempotency-Key`) on `insert/update/delete`; the server dedupes repeated attempts and returns the same result. Default dedupe window is 10 minutes (configurable).
+- Idempotency store: pluggable `IdempotencyStore` with memory default; supports get/set of prior results and optional in-flight locks to coalesce duplicates.
 - Bulk update/delete by `where` is resolved client-side by first selecting PKs, then performing batch operations by PK on the server.
 - Per-row outcomes for bulk operations:
   - `{ ok: number, failed: Array<{ pk: PK, error: { code: string, message: string } }>, pks: Array<PK> }`
@@ -679,7 +700,7 @@ Composite PK canonicalization:
 - Simple merges: Default row-level last-writer by `version`; optionally merge disjoint field updates when enabled per table.
 
 Client Datastores:
-- Pluggable local stores. Two first-class options in MVP:
+- Pluggable local stores. MVP includes:
   - `memory()` – in-memory, ephemeral. Fastest startup, zero dependencies.
   - `absurd()` – SQLite on the web via absurd-sql (IndexedDB-backed). Runs off the main thread in browsers. No fallback; if initialization fails, it surfaces an error.
 - No automatic fallback between datastores to ensure predictable behavior.
@@ -739,6 +760,24 @@ A: Yes. Set `realtime: 'off'` when creating the client; you can still call `sele
 - Max batch size for mutations: 100 rows (excess rejected with `BAD_REQUEST`).
 - Timeouts: server handlers target 10 s default per request.
 
+### Schema Generation CLI (MVP)
+- Provide an opt-in CLI, similar to Better Auth, that generates adapter-specific schema/migrations from the declared application `schema` and chosen adapter.
+- The CLI does not auto-apply by default; it primarily scaffolds SQL files and migration scripts in the repo.
+
+Example usage:
+```bash
+npx just-sync init --adapter sqlite --db-url "file:./app.db"
+npx just-sync generate:schema --adapter sqlite --out migrations/
+```
+
+Behavior:
+- Reads the exported `schema` and adapter configuration.
+- Emits adapter-specific DDL for tables, indexes, and the internal `_sync_versions` meta table.
+- Generates idempotent migration scripts with checks (create if not exists) and recommended indexes (PK, `updatedAt`).
+- Does not change DB engine settings (e.g., WAL). Users run migrations via their own tooling.
+- Safe by default: interactive by default.
+- Default output format: libsql/D1-style, timestamp-prefixed, one-file-per-migration in the specified `migrations/` directory.
+
 ### Adapter Interface (MVP)
 Database adapters MUST implement:
 - Transactions: `begin()`, `commit()`, `rollback()`
@@ -764,13 +803,26 @@ export function memory() {
 
 Database adapter contract details:
 - Transaction nesting: calling `begin` while a transaction is active must throw `INTERNAL` in MVP (no nested tx support).
-- Error mapping: translate DB constraint violations to `CONFLICT`; input issues to `BAD_REQUEST`; unexpected to `INTERNAL`.
+- Error mapping (SQLite specifics):
+  - Unique constraint violations → `CONFLICT` with `details: { constraint: 'unique', column?: string }` when column can be inferred.
+  - Invalid payload / validation failures → `BAD_REQUEST` with per-field details when available.
+  - Unexpected/internal errors → `INTERNAL` and include `{ requestId }` if present.
 - `selectWindow`: must return rows in the declared `orderBy`; `nextCursor` encodes the last row’s ordering keys.
 
 Cursor design:
 - Encoding: base64 of JSON `{ table, orderBy, last: { keys: Record<string, string|number>, id: string } }`.
 - Stability: valid only for same `{ table, orderBy }`; changing order or where invalidates the cursor.
 - Tie-breakers: always include `id` as final tie-breaker after `updatedAt` and `version`.
+
+Meta table DDL (authoritative):
+```sql
+CREATE TABLE IF NOT EXISTS _sync_versions (
+  table_name   TEXT    NOT NULL,
+  pk_canonical TEXT    NOT NULL,
+  version      INTEGER NOT NULL,
+  PRIMARY KEY (table_name, pk_canonical)
+);
+```
 
 ### Conflict Errors
 - On version mismatch, server returns `CONFLICT` with details `{ expectedVersion, actualVersion }`.
@@ -859,6 +911,14 @@ export interface ClientDatastore {
   // Read APIs used by client.select/watch
   readByPk(table: string, pk: PrimaryKey, select?: string[]): Promise<Record<string, unknown> | null>;
   readWindow(table: string, req: SelectWindow & { where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
+}
+
+export interface IdempotencyStore {
+  get(key: string): Promise<{ status: 'hit'; response: unknown } | { status: 'miss' }>;
+  set(key: string, response: unknown, ttlMs: number): Promise<void>;
+  // Optional: prevent duplicate in-flight work
+  acquire?(key: string, ttlMs: number): Promise<{ ok: true } | { ok: false }>;
+  release?(key: string): Promise<void>;
 }
 ```
 
