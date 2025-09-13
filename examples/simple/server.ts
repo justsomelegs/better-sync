@@ -1,6 +1,6 @@
 import { createSync, z } from '@sync/core';
 import { sqliteAdapter } from '@sync/adapter-sqlite';
-import { schema } from './schema.js';
+import { schema } from './schema';
 
 const sync = createSync({ schema, database: sqliteAdapter({ url: 'app.db' }), mutators: {
   addTodo: {

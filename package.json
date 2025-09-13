@@ -3,18 +3,21 @@
   "private": true,
   "version": "0.1.0",
   "workspaces": [
-    "packages/*"
+    "packages/*",
+    "examples/*"
   ],
   "scripts": {
-    "build": "npm run -ws build",
-    "typecheck": "npm run -ws typecheck",
-    "dev": "npm run -ws dev"
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "dev": "turbo run dev --parallel"
   },
   "devDependencies": {
     "@types/node": "^22.5.0",
+    "turbo": "^2.5.6",
     "typescript": "^5.5.4"
   },
   "engines": {
     "node": ">=18"
-  }
+  },
+  "packageManager": "npm@10.8.1"
 }

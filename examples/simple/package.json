@@ -3,12 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node server.js"
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node dist/server.js"
   },
   "dependencies": {
-    "@sync/core": "workspace:*",
-    "@sync/adapter-sqlite": "workspace:*",
-    "@sync/client": "workspace:*",
+    "@sync/adapter-sqlite": "0.1.0",
+    "@sync/client": "0.1.0",
+    "@sync/core": "0.1.0",
     "zod": "^3.23.8"
   }
 }
