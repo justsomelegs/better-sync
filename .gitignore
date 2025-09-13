@@ -1,0 +1,10 @@
+node_modules/
+dist/
+build/
+.turbo/
+.DS_Store
+*.log
+*.sqlite
+*.db
+coverage/
+apps/**/.next/
