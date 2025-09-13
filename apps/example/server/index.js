@@ -1,35 +1,35 @@
-import http from 'node:http';
+import { Hono } from 'hono';
+import { serve } from '@hono/node-server';
 import { core, adapterSqlite } from 'just-sync';
 import { schema } from './schema.js';
 
 const sync = core.createSync({ schema, database: adapterSqlite.sqliteAdapter({ url: 'file:./app.db' }) });
 
-const server = http.createServer(async (req, res) => {
-  if (!req.url || !req.method) { res.statusCode = 400; res.end('Bad Request'); return; }
-  const url = new URL(req.url, 'http://localhost:3000');
-  const chunks = [];
-  req.on('data', (c) => chunks.push(c));
-  req.on('end', async () => {
-    const body = Buffer.concat(chunks).toString('utf8');
-    const request = new Request(url.toString(), { method: req.method, headers: req.headers, body: ['GET','HEAD'].includes(req.method) ? undefined : body });
-    const response = await sync.fetch(request);
-    res.statusCode = response.status;
-    response.headers.forEach((v, k) => res.setHeader(k, v));
-    if (response.body) {
-      const reader = response.body.getReader();
-      const pump = () => reader.read().then(({ done, value }) => {
-        if (done) { res.end(); return; }
-        res.write(Buffer.from(value));
-        return pump();
-      });
-      pump();
-    } else {
-      const text = await response.text();
-      res.end(text);
-    }
-  });
+const app = new Hono();
+
+app.get('/events', async (c) => {
+  const res = await sync.fetch(new Request(new URL(c.req.url, 'http://localhost').toString(), { method: 'GET', headers: c.req.raw.headers }));
+  return new Response(res.body, { status: res.status, headers: res.headers });
 });
 
-server.listen(3000, () => {
-  console.log('Example server listening on http://localhost:3000');
+app.post('/mutate', async (c) => {
+  const body = await c.req.text();
+  const res = await sync.fetch(new Request(new URL(c.req.url, 'http://localhost').toString(), { method: 'POST', headers: c.req.raw.headers, body }));
+  return new Response(res.body, { status: res.status, headers: res.headers });
 });
+
+app.post('/select', async (c) => {
+  const body = await c.req.text();
+  const res = await sync.fetch(new Request(new URL(c.req.url, 'http://localhost').toString(), { method: 'POST', headers: c.req.raw.headers, body }));
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post('/mutators/:name', async (c) => {
+  const body = await c.req.text();
+  const url = new URL(c.req.url, 'http://localhost');
+  const res = await sync.fetch(new Request(url.toString(), { method: 'POST', headers: c.req.raw.headers, body }));
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+serve({ fetch: app.fetch, port: 3000 });
+console.log('Hono example listening on http://localhost:3000');

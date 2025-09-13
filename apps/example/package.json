@@ -9,6 +9,8 @@
     "lint": "biome check ."
   },
   "dependencies": {
+    "@hono/node-server": "^1.19.2",
+    "hono": "^4.9.7",
     "just-sync": "0.0.0"
   }
 }
