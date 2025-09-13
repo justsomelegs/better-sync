@@ -1,0 +1,55 @@
+{
+  "name": "just-sync",
+  "version": "0.0.1",
+  "private": false,
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./storage/server": {
+      "types": "./dist/storage/server/index.d.ts",
+      "import": "./dist/storage/server/index.js"
+    },
+    "./storage/client": {
+      "types": "./dist/storage/client/index.d.ts",
+      "import": "./dist/storage/client/index.js"
+    },
+    "./next-js": {
+      "types": "./dist/next-js/index.d.ts",
+      "import": "./dist/next-js/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli/index.d.ts",
+      "import": "./dist/cli/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts src/storage/server/index.ts src/storage/client/index.ts src/next-js/index.ts src/cli/index.ts --format esm --dts --sourcemap --clean",
+    "dev": "tsup --watch",
+    "clean": "rimraf dist",
+    "lint": "tsc -p tsconfig.json --noEmit",
+    "test": "node --version > /dev/null"
+  },
+  "bin": {
+    "just-sync": "./dist/cli/index.js"
+  },
+  "dependencies": {
+    "zod": "^3.23.8",
+    "ulid": "^2.3.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^9.6.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.2",
+    "rimraf": "^6.0.1",
+    "@types/node": "^22.7.4"
+  }
+}
+
