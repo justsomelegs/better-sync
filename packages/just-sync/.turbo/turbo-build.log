@@ -1,0 +1,33 @@
+
+
+> just-sync@0.0.1 build /workspace/packages/just-sync
+> tsup src/index.ts src/storage/server/index.ts src/storage/client/index.ts src/next-js/index.ts src/cli/index.ts --format esm --dts --sourcemap --clean
+
+[34mCLI[39m Building entry: src/index.ts, src/cli/index.ts, src/next-js/index.ts, src/storage/client/index.ts, src/storage/server/index.ts
+[34mCLI[39m Using tsconfig: tsconfig.json
+[34mCLI[39m tsup v8.5.0
+[34mCLI[39m Target: es2021
+[34mCLI[39m Cleaning output folder
+[34mESM[39m Build start
+[32mESM[39m [1mdist/index.js                    [22m[32m222.00 B[39m
+[32mESM[39m [1mdist/next-js/index.js            [22m[32m237.00 B[39m
+[32mESM[39m [1mdist/chunk-MWRWCX4L.js           [22m[32m12.77 KB[39m
+[32mESM[39m [1mdist/storage/client/index.js     [22m[32m316.00 B[39m
+[32mESM[39m [1mdist/chunk-V6TY7KAL.js           [22m[32m383.00 B[39m
+[32mESM[39m [1mdist/storage/server/index.js     [22m[32m3.83 KB[39m
+[32mESM[39m [1mdist/cli/index.js                [22m[32m1.31 KB[39m
+[32mESM[39m [1mdist/index.js.map                [22m[32m71.00 B[39m
+[32mESM[39m [1mdist/next-js/index.js.map        [22m[32m425.00 B[39m
+[32mESM[39m [1mdist/chunk-MWRWCX4L.js.map       [22m[32m29.43 KB[39m
+[32mESM[39m [1mdist/storage/client/index.js.map [22m[32m404.00 B[39m
+[32mESM[39m [1mdist/chunk-V6TY7KAL.js.map       [22m[32m71.00 B[39m
+[32mESM[39m [1mdist/storage/server/index.js.map [22m[32m7.72 KB[39m
+[32mESM[39m [1mdist/cli/index.js.map            [22m[32m2.25 KB[39m
+[32mESM[39m ⚡️ Build success in 18ms
+DTS Build start
+DTS ⚡️ Build success in 2286ms
+DTS dist/cli/index.d.ts            20.00 B
+DTS dist/next-js/index.d.ts        225.00 B
+DTS dist/storage/client/index.d.ts 121.00 B
+DTS dist/storage/server/index.d.ts 155.00 B
+DTS dist/index.d.ts                4.98 KB
