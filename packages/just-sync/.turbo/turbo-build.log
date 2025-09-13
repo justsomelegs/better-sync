@@ -1,0 +1,36 @@
+
+
+> just-sync@0.0.1 build
+> tsc -p tsconfig.build.json
+
+[1G[0K[96msrc/client/index.ts[0m:[93m95[0m:[93m24[0m - [91merror[0m[90m TS18047: [0m'res' is possibly 'null'.
+
+[7m95[0m             cb({ data: res.data, changes: null, cursor: res.nextCursor ?? null });
+[7m  [0m [91m                       ~~~[0m
+
+[96msrc/client/index.ts[0m:[93m95[0m:[93m57[0m - [91merror[0m[90m TS18047: [0m'res' is possibly 'null'.
+
+[7m95[0m             cb({ data: res.data, changes: null, cursor: res.nextCursor ?? null });
+[7m  [0m [91m                                                        ~~~[0m
+
+[96msrc/client/index.ts[0m:[93m106[0m:[93m24[0m - [91merror[0m[90m TS18047: [0m'res' is possibly 'null'.
+
+[7m106[0m             cb({ data: res.data, changes: null, cursor: res.nextCursor ?? null });
+[7m   [0m [91m                       ~~~[0m
+
+[96msrc/client/index.ts[0m:[93m106[0m:[93m57[0m - [91merror[0m[90m TS18047: [0m'res' is possibly 'null'.
+
+[7m106[0m             cb({ data: res.data, changes: null, cursor: res.nextCursor ?? null });
+[7m   [0m [91m                                                        ~~~[0m
+
+
+Found 4 errors in the same file, starting at: src/client/index.ts[90m:95[0m
+
+[1G[0K⠙[1G[0K[1mnpm[22m [31merror[39m Lifecycle script `build` failed with error:
+[1G[0K⠙[1G[0K[1mnpm[22m [31merror[39m [94mcode[39m [33m2[39m
+[1G[0K⠙[1G[0K[1mnpm[22m [31merror[39m [94mpath[39m /workspace/packages/just-sync
+[1G[0K⠙[1G[0K[1mnpm[22m [31merror[39m [94mworkspace[39m just-sync@0.0.1
+[1G[0K⠙[1G[0K[1mnpm[22m [31merror[39m [94mlocation[39m /workspace/packages/just-sync
+[1G[0K⠙[1G[0K[1mnpm[22m [31merror[39m command failed
+[1G[0K⠙[1G[0K[1mnpm[22m [31merror[39m [94mcommand[39m sh -c tsc -p tsconfig.build.json
+[1G[0K⠙[1G[0K
