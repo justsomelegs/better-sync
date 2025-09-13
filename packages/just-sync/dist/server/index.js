@@ -172,11 +172,44 @@ export function createSync(opts) {
             return jsonError("NOT_FOUND", `Mutator ${name} not found`);
         const body = (await req.json());
         await db.begin();
+        // Collect writes during mutator execution to emit a single SSE tx
+        const writes = new Map();
+        const collect = (table, pk) => {
+            const list = writes.get(table) ?? [];
+            list.push(pk);
+            writes.set(table, list);
+        };
+        const txDb = {
+            begin: () => db.begin(),
+            commit: () => db.commit(),
+            rollback: () => db.rollback(),
+            async insert(table, row) {
+                const res = await db.insert(table, row);
+                collect(table, res.id);
+                return res;
+            },
+            async updateByPk(table, pk, set, opts) {
+                const res = await db.updateByPk(table, pk, set, opts);
+                collect(table, pk);
+                return res;
+            },
+            async deleteByPk(table, pk) {
+                const res = await db.deleteByPk(table, pk);
+                collect(table, pk);
+                return res;
+            },
+            selectByPk: (table, pk, select) => db.selectByPk(table, pk, select),
+            selectWindow: (table, req) => db.selectWindow(table, req)
+        };
         try {
             // Skipping runtime validation for MVP; users can pass zod schema in args
-            const result = await m.handler({ db, ctx }, body.args);
+            const result = await m.handler({ db: txDb, ctx }, body.args);
             await db.commit();
-            // Mutators can perform writes via db.*; we do not auto-emit SSE here; expect handlers to use db methods
+            if (writes.size > 0) {
+                const txId = ulid();
+                for (const [table, pks] of writes)
+                    emitMutation(table, pks, txId);
+            }
             return json({ result });
         }
         catch (e) {
@@ -191,7 +224,8 @@ export function createSync(opts) {
     async function fetch(req, ctx = {}) {
         const path = toPath(req);
         if (req.method === "GET" && /\/events$/.test(path)) {
-            const since = req.headers.get("last-event-id") ?? undefined;
+            const url = new URL(req.url);
+            const since = req.headers.get("last-event-id") ?? url.searchParams.get("since") ?? undefined;
             const stream = buffer.stream(since);
             return new Response(stream, {
                 headers: {

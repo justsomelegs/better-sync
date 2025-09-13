@@ -39,7 +39,7 @@ export function createClient(opts) {
         return (await res.json());
     }
     function table(name) {
-        return {
+        const api = {
             async select(pkOrQuery, opts) {
                 if (typeof pkOrQuery === "string" || typeof pkOrQuery === "number" || (pkOrQuery && !("limit" in pkOrQuery))) {
                     const res = (await post(`/selectByPk`, { table: name, pk: pkOrQuery, select: opts?.select }));
@@ -65,11 +65,11 @@ export function createClient(opts) {
                 // naive approach: initial snapshot then subscribe to all events and reselect on any change
                 (async () => {
                     if (typeof pkOrQuery === "string" || typeof pkOrQuery === "number" || (pkOrQuery && !("limit" in pkOrQuery))) {
-                        const item = await this.select(pkOrQuery, opts);
+                        const item = await api.select(pkOrQuery, opts);
                         cb({ item, change: null, cursor: null });
                     }
                     else {
-                        const res = await this.select(pkOrQuery);
+                        const res = await api.select(pkOrQuery);
                         cb({ data: res.data, changes: null, cursor: res.nextCursor ?? null });
                     }
                     status = "live";
@@ -77,11 +77,11 @@ export function createClient(opts) {
                 const listener = async (_e) => {
                     // For MVP: simply rerun select on any mutation event
                     if (typeof pkOrQuery === "string" || typeof pkOrQuery === "number" || (pkOrQuery && !("limit" in pkOrQuery))) {
-                        const item = await this.select(pkOrQuery, opts);
+                        const item = await api.select(pkOrQuery, opts);
                         cb({ item, change: null, cursor: null });
                     }
                     else {
-                        const res = await this.select(pkOrQuery);
+                        const res = await api.select(pkOrQuery);
                         cb({ data: res.data, changes: null, cursor: res.nextCursor ?? null });
                     }
                 };
@@ -89,6 +89,7 @@ export function createClient(opts) {
                 return { unsubscribe: () => listeners.delete(listener), status };
             }
         };
+        return api;
     }
     return new Proxy({}, {
         get(_target, prop) {

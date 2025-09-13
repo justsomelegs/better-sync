@@ -58,7 +58,7 @@ export function createClient<TApp = unknown>(opts: ClientOptions) {
   }
 
   function table(name: string) {
-    return {
+    const api = {
       async select(pkOrQuery?: PrimaryKey | (SelectWindow & { where?: unknown }), opts?: { select?: string[] }) {
         if (typeof pkOrQuery === "string" || typeof pkOrQuery === "number" || (pkOrQuery && !("limit" in (pkOrQuery as any)))) {
           const res = (await post(`/selectByPk`, { table: name, pk: pkOrQuery, select: opts?.select })) as any;
@@ -88,10 +88,10 @@ export function createClient<TApp = unknown>(opts: ClientOptions) {
         // naive approach: initial snapshot then subscribe to all events and reselect on any change
         (async () => {
           if (typeof pkOrQuery === "string" || typeof pkOrQuery === "number" || (pkOrQuery && !("limit" in (pkOrQuery as any)))) {
-            const item = await (this as any).select(pkOrQuery, opts);
+            const item = await api.select(pkOrQuery, opts);
             cb({ item, change: null, cursor: null });
           } else {
-            const res = await (this as any).select(pkOrQuery);
+            const res = await api.select(pkOrQuery);
             cb({ data: res.data, changes: null, cursor: res.nextCursor ?? null });
           }
           status = "live";
@@ -99,10 +99,10 @@ export function createClient<TApp = unknown>(opts: ClientOptions) {
         const listener = async (_e: any) => {
           // For MVP: simply rerun select on any mutation event
           if (typeof pkOrQuery === "string" || typeof pkOrQuery === "number" || (pkOrQuery && !("limit" in (pkOrQuery as any)))) {
-            const item = await (this as any).select(pkOrQuery, opts);
+            const item = await api.select(pkOrQuery, opts);
             cb({ item, change: null, cursor: null });
           } else {
-            const res = await (this as any).select(pkOrQuery);
+            const res = await api.select(pkOrQuery);
             cb({ data: res.data, changes: null, cursor: res.nextCursor ?? null });
           }
         };
@@ -110,6 +110,7 @@ export function createClient<TApp = unknown>(opts: ClientOptions) {
         return { unsubscribe: () => listeners.delete(listener), status } as const;
       }
     } as const;
+    return api;
   }
 
   return new Proxy(
