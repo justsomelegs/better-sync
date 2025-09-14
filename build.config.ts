@@ -3,7 +3,7 @@ import { defineBuildConfig } from 'unbuild'
 export default defineBuildConfig({
   declaration: true,
   clean: true,
-  externals: ['esbuild', 'pnpapi'],
+  externals: ['esbuild', 'pnpapi', 'sql.js'],
   rollup: {
     emitCJS: false,
     inlineDependencies: false

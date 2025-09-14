@@ -47,9 +47,9 @@ async function ensureDir(dir: string): Promise<void> {
 }
 
 type TableSpec = {
-	 table?: string;
-	 primaryKey?: string[];
-	 updatedAt?: string;
+	table?: string;
+	primaryKey?: string[];
+	updatedAt?: string;
 };
 
 type AppSchema = Record<string, unknown | (TableSpec & { schema?: unknown })>;
@@ -119,10 +119,10 @@ async function findSchemaPath(cwd: string, hint?: string): Promise<{ path?: stri
 					try {
 						const st2 = await fs.stat(inner);
 						if (st2.isFile()) return { path: inner };
-					} catch {}
+					} catch { }
 				}
 			}
-		} catch {}
+		} catch { }
 	}
 	return {};
 }
@@ -143,8 +143,18 @@ async function generateSqliteMigration(outDir: string, schemaPath?: string): Pro
 	parts.push('  version      INTEGER NOT NULL,');
 	parts.push('  PRIMARY KEY (table_name, pk_canonical)');
 	parts.push(');');
-	// Schema reading is optional in MVP; only internal meta table is generated.
-	parts.push('');
+	// Optionally emit app tables if schema is provided
+	if (schemaPath) {
+		const app = await loadAppSchema(schemaPath);
+		if (app) {
+			parts.push('-- Application tables');
+			const tables = normalizeTables(app);
+			for (const t of tables) {
+				parts.push(ddlForTable(t));
+			}
+			parts.push('');
+		}
+	}
 	await fs.writeFile(full, parts.join('\n'), 'utf8');
 	return full;
 }

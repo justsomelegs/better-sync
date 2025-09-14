@@ -1,3 +1,4 @@
 export { createSync } from './server/createSync';
 export { createClient } from './shared/createClient';
-export type { PrimaryKey, OrderBy, SelectWindow } from './shared/types';
+export { createMemoryIdempotencyStore } from './shared/idempotency';
+export type { PrimaryKey, OrderBy, SelectWindow, IdempotencyStore } from './shared/types';

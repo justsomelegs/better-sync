@@ -7,6 +7,14 @@ export type SelectWindow = {
   cursor?: string | null;
 };
 
+export type VersionedRow<T extends Record<string, unknown> = Record<string, unknown>> = T & { version: number; updatedAt: number };
+
+export interface IdempotencyStore<V = unknown> {
+  has(key: string): Promise<boolean> | boolean;
+  get(key: string): Promise<V | undefined> | V | undefined;
+  set(key: string, value: V): Promise<void> | void;
+}
+
 export interface DatabaseAdapter {
   begin(): Promise<void>;
   commit(): Promise<void>;
@@ -17,3 +25,34 @@ export interface DatabaseAdapter {
   selectByPk(table: string, pk: PrimaryKey, select?: string[]): Promise<Record<string, unknown> | null>;
   selectWindow(table: string, req: SelectWindow & { where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
 }
+
+// Mutator typing helpers (for server and client type-safety)
+export type MutatorSpec<Args, Result> = { args?: unknown } & Record<string, unknown>;
+export type MutatorsSpec = Record<string, MutatorSpec<any, any>>;
+export type MutatorArgs<T> = T extends MutatorSpec<infer A, any> ? A : unknown;
+export type MutatorResult<T> = T extends MutatorSpec<any, infer R> ? Awaited<R> : unknown;
+
+// Server-side declaration (structure only for typing)
+export type ServerMutatorDef<Args, Result> = { args?: unknown; handler: (ctx: any, args: Args) => Promise<Result> | Result };
+export type ServerMutatorsSpec = Record<string, ServerMutatorDef<any, any>>;
+
+type ServerMutatorArg<T> = T extends { handler: (ctx: any, args: infer A) => any } ? A : unknown;
+type ServerMutatorRet<T> = T extends { handler: (...a: any) => infer R } ? Awaited<R> : unknown;
+
+// Client-side mapper from ServerMutatorsSpec to callable mutators
+export type ClientMutatorsFromServer<TSpec extends ServerMutatorsSpec> = {
+  [K in keyof TSpec]: (args: ServerMutatorArg<TSpec[K]>) => Promise<ServerMutatorRet<TSpec[K]>>;
+};
+
+// Client-side direct mapping from a local MutatorsSpec (when not using server spec)
+export type ClientMutators<TSpec extends MutatorsSpec> = {
+  [K in keyof TSpec]: (args: MutatorArgs<TSpec[K]>) => Promise<MutatorResult<TSpec[K]>>;
+};
+
+export function defineMutators<T extends MutatorsSpec>(spec: T): T { return spec; }
+
+// App-wide type augmentation hook. Libraries/apps can augment this interface via
+// `declare module 'just-sync' { interface AppTypes { Schema: any; Mutators: any } }`
+// to enable zero-generics client typing.
+// eslint-disable-next-line @typescript-eslint/no-empty-interface
+export interface AppTypes { }
