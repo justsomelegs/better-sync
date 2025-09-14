@@ -12,7 +12,7 @@ type SelectArgs = {
 type MutationResult = any;
 
 import type { LocalStore } from '../storage/client';
-import type { ClientMutators, MutatorsSpec, ServerMutatorsSpec, ClientMutatorsFromServer } from './types';
+import type { ServerMutatorsSpec, ClientMutatorsFromServer } from './types';
 
 export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
@@ -258,10 +258,10 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     function scheduleRetry() {
       const delay = backoffMs;
       backoffMs = Math.min(backoffMs * 2, 5000);
-      setTimeout(() => { if (!stopped) start(); }, delay);
+      setTimeout(() => { if (!stopped) void start(); }, delay);
     }
 
-    start();
+    void start();
     return () => { stopped = true; ac.abort(); set!.delete(onChange as any); };
   }
 
