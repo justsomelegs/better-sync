@@ -144,33 +144,45 @@ describe('E2E over HTTP', () => {
 		const ac2 = new AbortController();
 		const sub = await fetch(`${base}/events`, { signal: ac2.signal });
 		let firstEventId: string | null = null;
-		// trigger a mutation
+		// wait for initial keepalive to ensure stream warmed
+		{
+			const reader = sub.body!.getReader();
+			const td = new TextDecoder();
+			const start = Date.now();
+			let buffer = '';
+			while (Date.now() - start < 2000) {
+				const { value } = await reader.read();
+				if (!value) continue;
+				buffer += td.decode(value);
+				const frames = buffer.split('\n\n');
+				buffer = frames.pop() || '';
+				if (frames.some(f => f.trim() === ':keepalive')) break;
+			}
+			// reattach reader to readUntilEvent with a fresh Response stream is not trivial; instead, reopen events
+			ac2.abort();
+		}
+		const sub2 = await fetch(`${base}/events`);
+		// trigger a mutation after stream is warmed
 		{
 			const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: 'later' } }) });
 			if (!res.ok) { const t = await res.text(); throw new Error(`trigger mutate failed: ${res.status} ${t}`); }
 		}
-		const frame = await readUntilEvent(sub, 5000);
-		const idLine = frame.split('\n').find((l) => l.startsWith('id: ')) || '';
-		firstEventId = idLine.slice(4).trim();
-		if (!firstEventId) {
-			const dataLine = frame.split('\n').find((l) => l.startsWith('data: ')) || '';
-			try { const payload = JSON.parse(dataLine.slice(6)); firstEventId = String(payload?.eventId || ''); } catch {}
-		}
-		// retry reading additional events if id couldn't be parsed
 		let attempts = 0;
 		while (!firstEventId && attempts < 3) {
 			attempts++;
-			{
+			const frame = await readUntilEvent(sub2, 3000);
+			const idLine = frame.split('\n').find((l) => l.startsWith('id: ')) || '';
+			firstEventId = idLine.slice(4).trim();
+			if (!firstEventId) {
+				const dataLine = frame.split('\n').find((l) => l.startsWith('data: ')) || '';
+				try { const payload = JSON.parse(dataLine.slice(6)); firstEventId = String(payload?.eventId || ''); } catch {}
+			}
+			if (!firstEventId) {
 				const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: `later-${attempts}` } }) });
 				if (!res.ok) { const t = await res.text(); throw new Error(`retry mutate failed: ${res.status} ${t}`); }
 			}
-			const f2 = await readUntilEvent(sub, 2000);
-			const id2 = (f2.split('\n').find((l) => l.startsWith('id: ')) || '').slice(4).trim();
-			if (id2) { firstEventId = id2; break; }
-			const d2 = f2.split('\n').find((l) => l.startsWith('data: ')) || '';
-			try { const p = JSON.parse(d2.slice(6)); if (p?.eventId) { firstEventId = String(p.eventId); break; } } catch {}
 		}
-		ac2.abort();
+		expect(Boolean(firstEventId)).toBe(true);
 		// reconnect (use Last-Event-ID if available) and expect stream to stay open
 		const resumed = firstEventId
 			? await fetch(`${base}/events`, { headers: { 'Last-Event-ID': firstEventId } })
