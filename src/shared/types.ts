@@ -52,7 +52,16 @@ export type ClientMutators<TSpec extends MutatorsSpec> = {
 export function defineMutators<T extends MutatorsSpec>(spec: T): T { return spec; }
 
 // App-wide type augmentation hook. Libraries/apps can augment this interface via
-// `declare module 'just-sync' { interface AppTypes { Schema: any; Mutators: any } }`
-// to enable zero-generics client typing.
-// eslint-disable-next-line @typescript-eslint/no-empty-interface
-export interface AppTypes { }
+// `declare module 'just-sync' { interface AppTypes { Schema: { users: User; ... }; Mutators: ... } }`
+// to enable zero-generics client typing. Properties are optional so that the library works without augmentation.
+export interface AppTypes {
+  Schema?: Record<string, Record<string, unknown>>;
+  Mutators?: ServerMutatorsSpec;
+}
+
+// Utility types for deriving table and row types from AppTypes['Schema'] when provided
+export type AppSchema = NonNullable<AppTypes['Schema']> extends Record<string, any> ? NonNullable<AppTypes['Schema']> : {};
+export type AppMutators = NonNullable<AppTypes['Mutators']> extends ServerMutatorsSpec ? NonNullable<AppTypes['Mutators']> : {};
+
+export type TableNames<TSchema> = TSchema extends Record<string, any> ? keyof TSchema : never;
+export type RowOf<TSchema, K> = K extends keyof TSchema ? TSchema[K] : Record<string, unknown>;
