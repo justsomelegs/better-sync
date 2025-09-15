@@ -44,7 +44,7 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 		async commit() {},
 		async rollback() {},
 		async insert(table, row) {
-			const cols = Object.keys(row);
+			const cols = Object.keys(row).filter((c) => c !== 'version');
 			const values = cols.map((_, i) => placeholder(i)).join(',');
 			const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${values})`;
 			try {
