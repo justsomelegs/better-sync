@@ -1,6 +1,7 @@
-import type { RequestHandler } from '@sveltejs/kit';
+import type { Handle } from '@sveltejs/kit';
 import { createSync } from 'just-sync';
 import { sqliteAdapter } from 'just-sync/storage/server';
+import { toSvelteKitHandle } from 'just-sync/sveltekit';
 import { z } from 'zod';
 
 const schema = {
@@ -9,8 +10,5 @@ const schema = {
 
 const sync = createSync({ schema, database: sqliteAdapter({ url: 'file:./.data/app.db' }) });
 
-const handler = sync.fetch;
-
-export const GET: RequestHandler = async ({ request }) => handler(request);
-export const POST: RequestHandler = async ({ request }) => handler(request);
+export const handle: Handle = toSvelteKitHandle(sync.fetch, { basePath: '/api/sync' }) as any;
 

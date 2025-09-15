@@ -47,6 +47,9 @@
       "_false.js",
       "_equality.js",
       "_environment.js"
+    ],
+    "dynamicImports": [
+      "src/hooks.server.ts"
     ]
   },
   "_shared.js": {
@@ -104,6 +107,12 @@
       "_shared.js"
     ]
   },
+  "src/hooks.server.ts": {
+    "file": "chunks/hooks.server.js",
+    "name": "hooks.server",
+    "src": "src/hooks.server.ts",
+    "isDynamicEntry": true
+  },
   "src/routes/+page.svelte": {
     "file": "entries/pages/_page.svelte.js",
     "name": "entries/pages/_page.svelte",
@@ -116,11 +125,5 @@
     "css": [
       "_app/immutable/assets/_page.wr61C7ed.css"
     ]
-  },
-  "src/routes/api/sync/+server.ts": {
-    "file": "entries/endpoints/api/sync/_server.ts.js",
-    "name": "entries/endpoints/api/sync/_server.ts",
-    "src": "src/routes/api/sync/+server.ts",
-    "isEntry": true
   }
 }

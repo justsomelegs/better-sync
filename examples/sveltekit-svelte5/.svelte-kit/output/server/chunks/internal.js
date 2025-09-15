@@ -2043,7 +2043,7 @@ const options = {
 		<div class="error">
 			<span class="status">` + status + '</span>\n			<div class="message">\n				<h1>' + message + "</h1>\n			</div>\n		</div>\n	</body>\n</html>\n"
   },
-  version_hash: "10yf8pk"
+  version_hash: "1n5j4t2"
 };
 async function get_hooks() {
   let handle;
@@ -2051,6 +2051,7 @@ async function get_hooks() {
   let handleError;
   let handleValidationError;
   let init;
+  ({ handle, handleFetch, handleError, handleValidationError, init } = await import("./hooks.server.js"));
   let reroute;
   let transport;
   return {
