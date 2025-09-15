@@ -15,6 +15,12 @@ export function prismaAdapter(prisma: any): DatabaseAdapter {
 		},
 		paramStyle: 'positional',
 	};
-	return sqlExecutorAdapter(executor);
+	const base = sqlExecutorAdapter(executor) as DatabaseAdapter;
+	return {
+		...base,
+		async begin() { await prisma.$executeRawUnsafe('BEGIN'); },
+		async commit() { await prisma.$executeRawUnsafe('COMMIT'); },
+		async rollback() { await prisma.$executeRawUnsafe('ROLLBACK'); },
+	};
 }
 
