@@ -12,9 +12,9 @@ type SelectArgs = {
 type MutationResult = any;
 
 import type { LocalStore } from '../storage/client';
-import type { ClientMutators, MutatorsSpec, ServerMutatorsSpec, ClientMutatorsFromServer } from './types';
+import type { ClientMutatorsFromServer, ServerMutatorsSpec, AppSchema, RowOf, AppMutators, PrimaryKey } from './types';
 
-export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators }) {
+export function createClient<TServerMutators extends ServerMutatorsSpec = AppMutators>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
   let storePromise: Promise<LocalStore> | null = null;
@@ -278,7 +278,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     }
   };
 
-  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, row: Record<string, unknown>, opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, row, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local } as const;
+  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, row: Record<string, unknown>, opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, row, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local, table: (name: string): TableApi => tableApiFor(name) } as const;
   type TableApi = {
     select(args: Omit<SelectArgs, 'table'>): Promise<{ data: any[]; nextCursor: string | null }>;
     insert(row: Record<string, unknown>, opts?: { clientOpId?: string }): Promise<MutationResult>;
@@ -288,6 +288,16 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     watch(onChange: (evt: { table: string; pks?: any[]; rowVersions?: Record<string, number> }) => void): () => void;
     updateWhere(where: (row: any) => boolean, changes: { set: Record<string, unknown> }, opts?: { clientOpId?: string }): Promise<{ ok: number; pks: any[]; failed: any[] }>;
     deleteWhere(where: (row: any) => boolean, opts?: { clientOpId?: string }): Promise<{ ok: number; pks: any[]; failed: any[] }>;
+  };
+  type TypedTableApi<Row extends Record<string, unknown>> = {
+    select(args: Omit<SelectArgs, 'table'>): Promise<{ data: Row[]; nextCursor: string | null }>;
+    insert(row: Partial<Row>, opts?: { clientOpId?: string }): Promise<MutationResult>;
+    update(pk: PrimaryKey, set: Partial<Row>, opts?: { ifVersion?: number; clientOpId?: string }): Promise<MutationResult>;
+    delete(pk: PrimaryKey, opts?: { clientOpId?: string }): Promise<{ ok: true }>;
+    upsert(row: Partial<Row>, opts?: { merge?: (keyof Row & string)[]; clientOpId?: string }): Promise<any>;
+    watch(onChange: (evt: { table: string; pks?: PrimaryKey[]; rowVersions?: Record<string, number> }) => void): () => void;
+    updateWhere(where: (row: Row) => boolean, changes: { set: Partial<Row> }, opts?: { clientOpId?: string }): Promise<{ ok: number; pks: PrimaryKey[]; failed: any[] }>;
+    deleteWhere(where: (row: Row) => boolean, opts?: { clientOpId?: string }): Promise<{ ok: number; pks: PrimaryKey[]; failed: any[] }>;
   };
   function tableApiFor(name: string): TableApi {
     return {
@@ -301,7 +311,9 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       deleteWhere(where, opts) { return deleteWhere(name, where, opts); }
     };
   }
-  type Api = typeof api & { mutators: ClientMutatorsFromServer<TServerMutators> & { call: (name: string, args: unknown) => Promise<unknown> } } & Record<string, TableApi>;
+  type Api = typeof api
+    & { mutators: ClientMutatorsFromServer<TServerMutators> & { call: (name: string, args: unknown) => Promise<unknown> } }
+    & { [K in keyof AppSchema]: TypedTableApi<RowOf<AppSchema, K>> };
   // Build typed mutators proxy that infers keys/types from config.mutators when provided, and expose a dynamic call
   const mutators = new Proxy({ call: (name: string, args: any) => mutator(name as any, args) }, {
     get(target, prop: string) {
