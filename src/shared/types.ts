@@ -13,6 +13,8 @@ export interface IdempotencyStore<V = unknown> {
   has(key: string): Promise<boolean> | boolean;
   get(key: string): Promise<V | undefined> | V | undefined;
   set(key: string, value: V): Promise<void> | void;
+  acquire?(key: string, ttlMs: number): Promise<{ ok: true } | { ok: false }> | { ok: true } | { ok: false };
+  release?(key: string): Promise<void> | void;
 }
 
 export interface DatabaseAdapter {

@@ -60,20 +60,41 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   }
 
   async function select(args: SelectArgs): Promise<{ data: any[]; nextCursor: string | null }> {
-    // try local first if present and no filters
     const ds = await getStore();
-    if (ds && !args.where) {
-      const win = await ds.readWindow(args.table, { limit: args.limit, orderBy: args.orderBy, cursor: args.cursor ?? null });
-      return { data: win.data, nextCursor: win.nextCursor };
+    if (!args.where) {
+      if (ds) {
+        const win = await ds.readWindow(args.table, { limit: args.limit, orderBy: args.orderBy, cursor: args.cursor ?? null });
+        return { data: win.data, nextCursor: win.nextCursor };
+      }
+      const res = await postJson('/select', args);
+      const json = await res.json();
+      if (!args.cursor) {
+        const t = getTable(args.table);
+        for (const row of json.data) t.set(String(row.id), row);
+        if (ds) await ds.apply(json.data.map((r: any) => ({ table: args.table, type: 'insert', row: r })));
+      }
+      return json;
     }
-    const res = await postJson('/select', args);
-    const json = await res.json();
-    if (!args.cursor && !args.where) {
-      const t = getTable(args.table);
-      for (const row of json.data) t.set(String(row.id), row);
-      if (ds) await ds.apply(json.data.map((r: any) => ({ table: args.table, type: 'insert', row: r })));
+    // where provided: client-side filtering using paginated windows from server/datastore
+    const predicate = args.where as (row: any) => boolean;
+    const pageSize = args.limit ?? 100;
+    const orderBy = args.orderBy;
+    const collected: any[] = [];
+    let cursor: string | null | undefined = args.cursor ?? undefined;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const win = ds
+        ? await ds.readWindow(args.table, { limit: pageSize, orderBy, cursor: cursor ?? null })
+        : await postJson('/select', { table: args.table, select: args.select, orderBy, limit: pageSize, cursor }).then(r => r.json());
+      const rows = (win as any).data as any[];
+      for (const r of rows) if (predicate(r)) collected.push(r);
+      if (collected.length >= pageSize) break;
+      cursor = (win as any).nextCursor ?? null;
+      if (!cursor) break;
     }
-    return json;
+    const data = collected.slice(0, pageSize);
+    const nextCursor = collected.length > pageSize ? String(data[data.length - 1]?.id ?? '') : (cursor ?? null);
+    return { data, nextCursor };
   }
 
   async function insert(table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { clientOpId?: string }) {
@@ -204,18 +225,36 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     return json.result as any;
   }
 
-  function watch(table: string, onChange: (evt: { table: string; pks?: (string | number | Record<string, unknown>)[]; rowVersions?: Record<string, number> }) => void) {
+  function watch(table: string | { table: string; where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number }, onChange: (evt: { table: string; pks?: (string | number | Record<string, unknown>)[]; rowVersions?: Record<string, number>; data?: any[]; item?: any }) => void) {
+    const tableName = typeof table === 'string' ? table : table.table;
     // register local watcher
-    let set = watchers.get(table);
-    if (!set) { set = new Set(); watchers.set(table, set); }
-    set.add(onChange as any);
+    let set = watchers.get(tableName);
+    if (!set) { set = new Set(); watchers.set(tableName, set); }
+    const localNotify = (evt: any) => onChange(evt);
+    set.add(localNotify as any);
+
+    // initial snapshot
+    (async () => {
+      try {
+        if (typeof table === 'string') {
+          const win = await select({ table: tableName, limit: 1 });
+          onChange({ table: tableName, data: win.data });
+        } else {
+          const res = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+          onChange({ table: tableName, data: res.data });
+        }
+      } catch { }
+    })();
 
     const ac = new AbortController();
     let backoffMs = 500;
     let lastEventId: string | null = null;
     let stopped = false;
 
-    async function start() {
+    let usePolling = false;
+    let pollTimer: any = null;
+
+    async function startSse() {
       try {
         const headers: Record<string, string> = {};
         if (lastEventId) headers['Last-Event-ID'] = lastEventId;
@@ -236,33 +275,49 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
             const idLine = f.split('\n').find((l) => l.startsWith('id: '));
             if (idLine) lastEventId = idLine.slice(4).trim();
             if (f.includes('event: mutation')) {
-              const lines = f.split('\n');
-              const dataLine = lines.find((l) => l.startsWith('data: ')) || '';
-              const json = dataLine.slice(6);
               try {
-                const payload = JSON.parse(json) as { tables: { name: string; pks?: any[]; rowVersions?: Record<string, number> }[] };
-                for (const t of payload.tables) {
-                  if (t.name === table) onChange({ table: t.name, pks: t.pks, rowVersions: t.rowVersions });
+                if (typeof table === 'string') {
+                  const data = await select({ table: tableName, limit: 1 });
+                  onChange({ table: tableName, data: data.data });
+                } else {
+                  const data = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+                  onChange({ table: tableName, data: data.data });
                 }
               } catch { }
             }
           }
         }
-        // normal end -> retry
         if (!stopped) scheduleRetry();
       } catch {
-        if (!stopped) scheduleRetry();
+        // Switch to polling if SSE fails immediately
+        if (!stopped && !usePolling) { usePolling = true; startPolling(); }
+        else if (!stopped) scheduleRetry();
       }
+    }
+
+    function startPolling() {
+      const interval = 1500;
+      pollTimer = setInterval(async () => {
+        try {
+          if (typeof table === 'string') {
+            const data = await select({ table: tableName, limit: 1 });
+            onChange({ table: tableName, data: data.data });
+          } else {
+            const data = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+            onChange({ table: tableName, data: data.data });
+          }
+        } catch { }
+      }, interval);
     }
 
     function scheduleRetry() {
       const delay = backoffMs;
       backoffMs = Math.min(backoffMs * 2, 5000);
-      setTimeout(() => { if (!stopped) start(); }, delay);
+      setTimeout(() => { if (!stopped) startSse(); }, delay);
     }
 
-    start();
-    return () => { stopped = true; ac.abort(); set!.delete(onChange as any); };
+    startSse();
+    return () => { stopped = true; ac.abort(); if (pollTimer) clearInterval(pollTimer); set!.delete(localNotify as any); };
   }
 
   const local = {
@@ -278,13 +333,13 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     }
   };
 
-  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, row: Record<string, unknown>, opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, row, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local } as const;
+  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, rows, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local } as const;
   type TableApi = {
     select(args: Omit<SelectArgs, 'table'>): Promise<{ data: any[]; nextCursor: string | null }>;
     insert(row: Record<string, unknown>, opts?: { clientOpId?: string }): Promise<MutationResult>;
     update(pk: string | number | Record<string, string | number>, set: Record<string, unknown>, opts?: { ifVersion?: number; clientOpId?: string }): Promise<MutationResult>;
     delete(pk: string | number | Record<string, string | number>, opts?: { clientOpId?: string }): Promise<{ ok: true }>;
-    upsert(row: Record<string, unknown>, opts?: { merge?: string[]; clientOpId?: string }): Promise<any>;
+    upsert(rows: Record<string, unknown> | Record<string, unknown>[], opts?: { merge?: string[]; clientOpId?: string }): Promise<any>;
     watch(onChange: (evt: { table: string; pks?: any[]; rowVersions?: Record<string, number> }) => void): () => void;
     updateWhere(where: (row: any) => boolean, changes: { set: Record<string, unknown> }, opts?: { clientOpId?: string }): Promise<{ ok: number; pks: any[]; failed: any[] }>;
     deleteWhere(where: (row: any) => boolean, opts?: { clientOpId?: string }): Promise<{ ok: number; pks: any[]; failed: any[] }>;
@@ -295,7 +350,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       insert(row, opts) { return insert(name, row, opts); },
       update(pk, set, opts) { return update(name, pk, set, opts); },
       delete(pk, opts) { return del(name, pk, opts); },
-      upsert(row, opts) { return api.upsert(name, row, opts); },
+      upsert(rows, opts) { return api.upsert(name, rows, opts); },
       watch(onChange) { return watch(name, onChange); },
       updateWhere(where, changes, opts) { return updateWhere(name, where, changes, opts); },
       deleteWhere(where, opts) { return deleteWhere(name, where, opts); }

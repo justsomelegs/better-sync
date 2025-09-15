@@ -67,16 +67,13 @@ function normalizeTables(appSchema: AppSchema): Array<{ name: string; pk: string
 }
 
 function ddlForTable(table: { name: string; pk: string[]; updatedAt: string }): string {
-	const cols = new Set<string>();
-	for (const k of table.pk) cols.add(k);
-	cols.add(table.updatedAt);
-	const colDefs = Array.from(cols).map((c) => {
-		const isPkCol = table.pk.length === 1 && c === table.pk[0];
-		const type = c === table.updatedAt ? 'INTEGER' : 'TEXT';
-		return `  ${c} ${type}${isPkCol ? ' PRIMARY KEY' : ''}`;
-	});
-	const pkComposite = table.pk.length > 1 ? `,\n  PRIMARY KEY (${table.pk.join(', ')})` : '';
-	return `CREATE TABLE IF NOT EXISTS ${table.name} (\n${colDefs.join(',\n')}\n${pkComposite}\n);`;
+	// Canonical MVP DDL: single 'id' primary key with per-table updatedAt
+	const updatedAtCol = table.updatedAt || 'updatedAt';
+	const colDefs = [
+		`  id TEXT PRIMARY KEY`,
+		`  ${updatedAtCol} INTEGER`
+	];
+	return `CREATE TABLE IF NOT EXISTS ${table.name} (\n${colDefs.join(',\n')}\n);`;
 }
 
 async function transpileTsToMjs(tsPath: string): Promise<string> {

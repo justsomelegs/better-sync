@@ -25,7 +25,8 @@ const mutateSchema = z.discriminatedUnion('op', [
 	z.object({
 		op: z.literal('upsert'),
 		table: z.string(),
-		row: z.record(z.string(), z.unknown()),
+		rows: z.union([z.array(z.record(z.string(), z.unknown())), z.record(z.string(), z.unknown())]).optional(),
+		row: z.record(z.string(), z.unknown()).optional(),
 		merge: z.array(z.string()).optional(),
 		clientOpId: z.string().optional()
 	}),
@@ -90,6 +91,10 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 
 	function getTableSchema(name: string): ZodObject<any> | undefined {
 		return tableDefs.get(name)?.schema;
+	}
+
+	function getUpdatedAtField(name: string): string {
+		return tableDefs.get(name)?.updatedAt || 'updatedAt';
 	}
 
 	function canonicalPkValue(pk: PrimaryKey): string {
@@ -161,7 +166,9 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		return new Response(stream, {
 			headers: {
 				'Content-Type': 'text/event-stream',
-				'Cache-Control': 'no-cache'
+				'Cache-Control': 'no-cache',
+				'Connection': 'keep-alive',
+				'X-Accel-Buffering': 'no'
 			}
 		});
 	});
@@ -191,7 +198,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 						}
 						const providedId = (r as any).id;
 						const stampedId = chooseStampedId(ulid, providedId);
-						const stamped = { ...r, id: stampedId, updatedAt: Date.now(), version: ++versionCounter };
+						const stamped = { ...r, id: stampedId, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter } as Record<string, unknown>;
 						out.push(await db.insert(body.table, stamped));
 					}
 					result = { rows: out };
@@ -203,7 +210,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 					}
 					const providedId = (body.rows as any).id;
 					const stampedId = chooseStampedId(ulid, providedId);
-					const stamped = { ...body.rows, id: stampedId, updatedAt: Date.now(), version: ++versionCounter };
+					const stamped = { ...body.rows, id: stampedId, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter } as Record<string, unknown>;
 					const row = await db.insert(body.table, stamped);
 					result = { row };
 				}
@@ -214,34 +221,35 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 					const parsed = (tableSchema.partial() as unknown as ZodTypeAny).safeParse(body.set);
 					if (!parsed.success) { const e: any = new Error('Validation failed'); e.code = 'BAD_REQUEST'; e.details = parsed.error.issues; throw e; }
 				}
-				const row = await db.updateByPk(body.table, body.pk, { ...body.set, updatedAt: Date.now(), version: ++versionCounter }, { ifVersion: body.ifVersion });
+				const row = await db.updateByPk(body.table, body.pk, { ...body.set, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter }, { ifVersion: body.ifVersion });
 				result = { row };
 			}
 			if (body.op === 'upsert') {
-				const incoming = body.row as Record<string, unknown>;
-				const tableSchema = getTableSchema(body.table);
-				if (tableSchema) {
-					const parsed = (tableSchema.partial() as unknown as ZodTypeAny).safeParse(incoming);
-					if (!parsed.success) { const e: any = new Error('Validation failed'); e.code = 'BAD_REQUEST'; e.details = parsed.error.issues; throw e; }
-				}
-				const providedId = (incoming as any).id;
-				const id = chooseStampedId(ulid, providedId);
-				const existing = await db.selectByPk(body.table, id);
-				if (!existing) {
-					const stamped = { ...incoming, id, updatedAt: Date.now(), version: ++versionCounter };
-					const row = await db.insert(body.table, stamped);
-					result = { row };
-				} else {
-					const mergeKeys = body.merge;
-					if (mergeKeys && mergeKeys.length === 0) {
-						const e: any = new Error('insert-only upsert found existing'); e.code = 'CONFLICT'; throw e;
+				const single = (body as any).row as Record<string, unknown> | undefined;
+				const items = single ? [single] : (Array.isArray((body as any).rows) ? (body as any).rows as Record<string, unknown>[] : [((body as any).rows as Record<string, unknown>)]);
+				const out: Record<string, unknown>[] = [];
+				for (const incoming of items) {
+					const tableSchema = getTableSchema(body.table);
+					if (tableSchema) {
+						const parsed = (tableSchema.partial() as unknown as ZodTypeAny).safeParse(incoming);
+						if (!parsed.success) { const e: any = new Error('Validation failed'); e.code = 'BAD_REQUEST'; e.details = parsed.error.issues; throw e; }
 					}
-					const keys = mergeKeys ?? Object.keys(incoming).filter((k) => k !== 'id' && k !== 'updatedAt');
-					const set: Record<string, unknown> = {};
-					for (const k of keys) set[k] = incoming[k];
-					const row = await db.updateByPk(body.table, id, { ...set, updatedAt: Date.now(), version: ++versionCounter });
-					result = { row };
+					const providedId = (incoming as any).id;
+					const id = chooseStampedId(ulid, providedId);
+					const existing = await db.selectByPk(body.table, id);
+					if (!existing) {
+						const stamped = { ...incoming, id, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter } as Record<string, unknown>;
+						out.push(await db.insert(body.table, stamped));
+					} else {
+						const mergeKeys = body.merge;
+						if (mergeKeys && mergeKeys.length === 0) { const e: any = new Error('insert-only upsert found existing'); e.code = 'CONFLICT'; throw e; }
+						const keys = mergeKeys ?? Object.keys(incoming).filter((k) => k !== 'id' && k !== 'updatedAt');
+						const set: Record<string, unknown> = {};
+						for (const k of keys) set[k] = incoming[k];
+						out.push(await db.updateByPk(body.table, id, { ...set, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter }));
+					}
 				}
+				result = single ? { row: out[0] } : (Array.isArray((body as any).rows) ? { rows: out } : { row: out[0] });
 			}
 			if (body.op === 'delete') {
 				const res = await db.deleteByPk(body.table, body.pk);
@@ -313,13 +321,13 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		const opId = ctx.body?.clientOpId ?? ulid();
 		if (await Promise.resolve(idem.has(opId))) {
 			const prev = await Promise.resolve(idem.get(opId));
-			return { ...(prev as object), duplicated: true } as any;
+			return { ...(typeof prev === 'object' && prev && 'result' in (prev as any) ? (prev as any) : { result: prev }), duplicated: true } as any;
 		}
 		await db.begin();
 		try {
 			const result = await def.handler({ db, ctx: {} }, parsed);
 			await db.commit();
-			await Promise.resolve(idem.set(opId, result));
+			await Promise.resolve(idem.set(opId, { result }));
 			return { result } as any;
 		} catch (e) {
 			await db.rollback();

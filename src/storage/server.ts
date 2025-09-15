@@ -111,7 +111,7 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const params: any[] = [table];
       if (req.cursor) {
         try {
-          const c = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } };
+          const c = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { table?: string; orderBy?: Record<string, 'asc' | 'desc'>; last?: { keys?: Record<string, string | number>; id: string } };
           if (c?.last?.id) { sql += ` WHERE t.id > ?`; params.push(c.last.id); }
         } catch { }
       }
@@ -128,7 +128,9 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       let nextCursor: string | null = null;
       if (out.length === limit) {
         const last = out[out.length - 1];
-        nextCursor = Buffer.from(JSON.stringify({ last: { id: String((last as any).id) } }), 'utf8').toString('base64');
+        const lastKeys: Record<string, string | number> = {};
+        for (const k of keys) lastKeys[k] = (last as any)[k];
+        nextCursor = Buffer.from(JSON.stringify({ table, orderBy, last: { keys: lastKeys, id: String((last as any).id) } }), 'utf8').toString('base64');
       }
       return { data: out, nextCursor };
     }
@@ -157,7 +159,7 @@ export function memoryAdapter(): DatabaseAdapter {
         const e: any = new Error('duplicate'); e.code = 'CONFLICT'; e.details = { constraint: 'unique', column: 'id' }; throw e;
       }
       const now = Date.now();
-      const out = { ...row, id, updatedAt: (row as any).updatedAt ?? now, version: 1 };
+      const out = { ...row, id, updatedAt: (row as any).updatedAt ?? now, version: (row as any).version ?? 1 };
       t.set(key, out);
       return out;
     },
