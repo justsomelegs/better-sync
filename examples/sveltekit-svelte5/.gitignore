@@ -1,0 +1,29 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# SvelteKit build output
+.svelte-kit/
+build/
+
+# Vite
+vite.config.ts.timestamp-*
+
+# Local data
+.data/
+
+# Env
+.env
+.env.*
+
+# Editor/OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Locks (optional for examples)
+package-lock.json
