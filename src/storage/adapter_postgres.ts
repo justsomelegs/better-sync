@@ -1,6 +1,5 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
-import { monotonicFactory } from 'ulid';
 
 function canonicalPk(pk: PrimaryKey): string {
 	if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
@@ -8,71 +7,102 @@ function canonicalPk(pk: PrimaryKey): string {
 	return parts.join('|');
 }
 
-export function postgresAdapter(_config: { url: string }): DatabaseAdapter {
-	// Temporary in-memory implementation; to be replaced with real pg client
-	const tables = new Map<string, Map<string, any>>();
-	const ulid = monotonicFactory();
+export function postgresAdapter(config: { url: string }): DatabaseAdapter {
+	async function getClient() {
+		try {
+			const mod: any = await import('pg');
+			const { Client } = mod as any;
+			const c = new Client({ connectionString: config.url });
+			await c.connect();
+			return c;
+		} catch (e) {
+			const err: any = new Error('pg client not installed or cannot connect.'); err.code = 'INTERNAL'; throw err;
+		}
+	}
+	async function run(sql: string, params?: any[]) {
+		const c = await getClient();
+		try { const res = await c.query(sql, params || []); await c.end(); return res; } catch (e) { await c.end(); throw e; }
+	}
 	return createAdapter({
-		async ensureMeta() { /* no-op */ },
+		async ensureMeta() {
+			await run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
+		},
 		async insert(table, row) {
-			const t = tables.get(table) ?? (tables.set(table, new Map()), tables.get(table)!);
-			const id = (row as any).id ?? ulid();
-			const key = String(id);
-			if (t.has(key)) { const e: any = new Error('duplicate'); e.code = 'CONFLICT'; e.details = { constraint: 'unique', column: 'id' }; throw e; }
-			const now = Date.now();
-			const out = { ...row, id, updatedAt: (row as any).updatedAt ?? now, version: (row as any).version ?? 1 };
-			t.set(key, out);
-			return out;
+			const cols = Object.keys(row);
+			const placeholders = cols.map((_, i) => `$${i + 1}`).join(',');
+			const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`;
+			try { await run(sql, cols.map((k) => (row as any)[k])); } catch (e: any) { const err: any = new Error(e?.message || 'insert failed'); err.code = mapPgError(e); err.details = { table }; throw err; }
+			if ((row as any).id != null && typeof (row as any).version === 'number') {
+				const id = String((row as any).id);
+				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES ($1,$2,$3) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=EXCLUDED.version`, [table, id, (row as any).version]);
+			}
+			return { ...row } as any;
 		},
 		async updateByPk(table, pk, set, opts) {
-			const t = tables.get(table) ?? new Map();
 			const key = canonicalPk(pk);
-			const cur = t.get(key);
-			if (!cur) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
-			if (opts?.ifVersion && cur.version !== opts.ifVersion) { const e: any = new Error('Version mismatch'); e.code = 'CONFLICT'; e.details = { expectedVersion: opts.ifVersion, actualVersion: cur.version }; throw e; }
-			const now = Date.now();
-			const out = { ...cur, ...set, updatedAt: now, version: (set as any).version ?? ((cur.version ?? 0) + 1) };
-			t.set(key, out);
-			return out;
+			const cols = Object.keys(set).filter((c) => c !== 'version');
+			if (cols.length > 0) {
+				const assigns = cols.map((c, i) => `${c} = $${i + 1}`).join(',');
+				const sql = `UPDATE ${table} SET ${assigns} WHERE id = $${cols.length + 1}`;
+				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { const err: any = new Error(e?.message || 'update failed'); err.code = mapPgError(e); err.details = { table, pk: key }; throw err; }
+			}
+			if ((set as any).version != null) {
+				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES ($1,$2,$3) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=EXCLUDED.version`, [table, key, (set as any).version]);
+			}
+			const res = await run(`SELECT * FROM ${table} WHERE id = $1 LIMIT 1`, [key]);
+			if (!res.rows || res.rows.length === 0) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+			const row: any = { ...res.rows[0] };
+			const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = $1 AND pk_canonical = $2 LIMIT 1`, [table, key]);
+			if (vres.rows?.length) row.version = Number(vres.rows[0]?.version);
+			return row;
 		},
 		async deleteByPk(table, pk) {
-			const t = tables.get(table) ?? new Map();
 			const key = canonicalPk(pk);
-			if (!t.has(key)) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
-			t.delete(key);
+			await run(`DELETE FROM ${table} WHERE id = $1`, [key]);
+			await run(`DELETE FROM _sync_versions WHERE table_name = $1 AND pk_canonical = $2`, [table, key]);
 			return { ok: true } as const;
 		},
 		async selectByPk(table, pk, select) {
-			const t = tables.get(table) ?? new Map();
 			const key = canonicalPk(pk);
-			const row = t.get(key) ?? null;
-			if (!row) return null;
-			if (!select || select.length === 0) return row;
-			const out: any = {}; for (const f of select) out[f] = row[f]; return out;
+			const res = await run(`SELECT * FROM ${table} WHERE id = $1 LIMIT 1`, [key]);
+			if (!res.rows || res.rows.length === 0) return null;
+			const full: any = { ...res.rows[0] };
+			const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = $1 AND pk_canonical = $2 LIMIT 1`, [table, key]);
+			if (vres.rows?.length) full.version = Number(vres.rows[0]?.version);
+			if (!select || select.length === 0) return full;
+			const out: any = {}; for (const f of select) out[f] = full[f]; return out;
 		},
 		async selectWindow(table, req: any) {
-			const t = tables.get(table) ?? new Map<string, any>();
-			let rows = Array.from(t.values());
 			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
 			const keys = Object.keys(orderBy);
-			rows.sort((a, b) => {
-				for (const k of keys) {
-					const dir = orderBy[k]; const va = a[k]; const vb = b[k]; if (va === vb) continue; const cmp = va > vb ? 1 : -1; return dir === 'asc' ? cmp : -cmp;
-				}
-				return String(a.id).localeCompare(String(b.id));
-			});
-			const limit = typeof req.limit === 'number' ? req.limit : 100;
-			let start = 0;
+			let where = '';
+			const params: any[] = [];
 			if (req.cursor) {
-				try { const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } }; const lastId = json?.last?.id; if (lastId) { const idx = rows.findIndex(r => String(r.id) === String(lastId)); if (idx >= 0) start = idx + 1; } } catch { }
+				try { const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } }; if (json?.last?.id) { where = 'WHERE id > $1'; params.push(json.last.id); } } catch { }
 			}
-			const page = rows.slice(start, start + limit);
+			let sql = `SELECT * FROM ${table} ${where}`;
+			if (keys.length > 0) {
+				const ord = keys.map((k) => `${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
+				sql += ` ORDER BY ${ord}, id ASC`;
+			} else {
+				sql += ` ORDER BY id ASC`;
+			}
+			const limit = typeof req.limit === 'number' ? req.limit : 100;
+			sql += ` LIMIT $${params.length + 1}`; params.push(limit);
+			const res = await run(sql, params);
+			const rows = (res.rows || []).map((r) => ({ ...r }));
 			let nextCursor: string | null = null;
-			if ((start + limit) < rows.length && page.length > 0) {
-				const last = page[page.length - 1];
-				nextCursor = Buffer.from(JSON.stringify({ last: { id: String(last.id) } }), 'utf8').toString('base64');
+			if (rows.length === limit) {
+				const last = rows[rows.length - 1];
+				nextCursor = Buffer.from(JSON.stringify({ last: { id: String((last as any).id) } }), 'utf8').toString('base64');
 			}
-			return { data: page, nextCursor };
+			return { data: rows, nextCursor };
 		}
 	});
+}
+
+function mapPgError(e: any): string {
+	const code = String((e && e.code) || '');
+	if (code === '23505') return 'CONFLICT';
+	return 'INTERNAL';
 }
