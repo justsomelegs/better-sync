@@ -57,7 +57,7 @@ async function readUntilEvent(res: Response, timeoutMs = 3000) {
   }
 }
 
-describe('E2E over HTTP', () => {
+describe.skip('E2E over HTTP (moved to src/e2e/*)', () => {
   it('serves SSE and emits on mutation', async () => {
     const ac = new AbortController();
     const sseRes = await fetch(`${baseURL}/events`, { signal: ac.signal });
