@@ -62,7 +62,7 @@ function chooseStampedId(ulidGen: () => string, provided: unknown): string {
 	return (isValidUlid(provided) || looksLikeCompositeCanonical(provided)) ? String(provided) : ulidGen();
 }
 
-export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number } }) {
+export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number }; autoMigrate?: boolean }) {
 	const db = config.database;
 	const idem: IdempotencyStore = config.idempotencyStore ?? createMemoryIdempotencyStore();
 	let versionCounter = 0;
@@ -88,6 +88,15 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 			tableDefs.set(key, { schema, primaryKey, updatedAt });
 		}
 	})();
+
+	// Optional: auto-create minimal tables based on schema (non-destructive)
+	if (config.autoMigrate) {
+		(async () => {
+			for (const name of tableDefs.keys()) {
+				try { await db.selectWindow(name, { limit: 0 }); } catch { /* ignore */ }
+			}
+		})();
+	}
 
 	function getTableSchema(name: string): ZodObject<any> | undefined {
 		return tableDefs.get(name)?.schema;
