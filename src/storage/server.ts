@@ -25,6 +25,9 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     const defs = cols.map((c) => c === 'id' ? `${c} TEXT PRIMARY KEY` : `${c} TEXT`).join(',');
     db.run(`CREATE TABLE IF NOT EXISTS ${table} (${defs})`);
   }
+  async function ensureMinimalTable(db: any, table: string) {
+    db.run(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, updatedAt INTEGER)`);
+  }
   return {
     async begin() { const db = await ready; if (txDepth === 0) db.run('BEGIN'); txDepth++; },
     async commit() { const db = await ready; if (txDepth > 0) { txDepth--; if (txDepth === 0) { db.run('COMMIT'); if (filePath) { const data = db.export(); await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { }); await fs.writeFile(filePath, Buffer.from(data)); } } } },
@@ -55,7 +58,9 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const db = await ready;
       db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
       const key = canonicalPk(pk);
-      const g = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
+      let g: any;
+      try { g = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`); }
+      catch (err: any) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
       g.bind([key]); const cur = g.step() ? g.getAsObject() : null; g.free();
       if (!cur) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
       if (opts?.ifVersion != null) {
@@ -83,7 +88,9 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     async deleteByPk(table: string, pk: PrimaryKey) {
       const db = await ready;
       const key = canonicalPk(pk);
-      const s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`);
+      let s: any;
+      try { s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`); }
+      catch (err: any) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
       s.bind([key]); const existed = s.step(); s.free();
       if (!existed) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
       db.run(`DELETE FROM ${table} WHERE id = ?`, [key]);
@@ -92,6 +99,7 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     },
     async selectByPk(table: string, pk: PrimaryKey, select?: string[]) {
       const db = await ready;
+      await ensureMinimalTable(db, table);
       const key = canonicalPk(pk);
       const s = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
       s.bind([key]); const row = s.step() ? s.getAsObject() : null; s.free();
@@ -105,13 +113,14 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     },
     async selectWindow(table: string, req: any) {
       const db = await ready;
+      await ensureMinimalTable(db, table);
       const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
       const keys = Object.keys(orderBy);
       let sql = `SELECT t.*, v.version AS __ver FROM ${table} t LEFT JOIN _sync_versions v ON v.table_name = ? AND v.pk_canonical = t.id`;
       const params: any[] = [table];
       if (req.cursor) {
         try {
-          const c = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { table?: string; orderBy?: Record<string, 'asc' | 'desc'>; last?: { keys?: Record<string, string | number>; id: string } };
+          const c = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } };
           if (c?.last?.id) { sql += ` WHERE t.id > ?`; params.push(c.last.id); }
         } catch { }
       }
