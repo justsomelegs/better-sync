@@ -2,11 +2,22 @@ import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
 
 /**
- * Drizzle adapter. Requires caller to pass their drizzle db and the `sql` helper.
- * Works with any driver as long as `execute(sql)` returns driver result and `query(sql)` returns rows.
+ * Drizzle adapter. Pass only the Drizzle `db` instance. We lazy-import `drizzle-orm`'s `sql` helper.
  */
-export function drizzleAdapter(config: { db: { execute: (q: any) => Promise<any> | any; query: (q: any) => Promise<any[]> | any[] }; sql: any }): DatabaseAdapter {
-	const { db, sql } = config;
+export function drizzleAdapter(db: { execute: (q: any) => Promise<any> | any }): DatabaseAdapter {
+	let cachedSql: any | null = null;
+	async function getSql() {
+		if (cachedSql) return cachedSql;
+		try {
+			const mod: any = await import('drizzle-orm');
+			cachedSql = mod.sql;
+			return cachedSql;
+		} catch (e) {
+			const err: any = new Error('drizzle-orm is not installed. Please add drizzle-orm to use drizzleAdapter.');
+			err.code = 'INTERNAL';
+			throw err;
+		}
+	}
 
 	function canonicalPk(pk: PrimaryKey): string {
 		if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
@@ -16,13 +27,15 @@ export function drizzleAdapter(config: { db: { execute: (q: any) => Promise<any>
 		return parts.join('|');
 	}
 
-	async function run(q: any) {
-		return await Promise.resolve(db.execute(q));
-	}
-
+	async function run(q: any) { return await Promise.resolve(db.execute(q)); }
 	async function select(q: any) {
-		const rows = await Promise.resolve(db.query(q));
-		return Array.isArray(rows) ? rows : (rows as any).rows ?? [];
+		const res = await Promise.resolve(db.execute(q));
+		if (Array.isArray(res)) return res as any[];
+		if (res && typeof res === 'object') {
+			if ('rows' in (res as any) && Array.isArray((res as any).rows)) return (res as any).rows;
+			if ('rowsAffected' in (res as any) || 'lastInsertRowid' in (res as any)) return [];
+		}
+		return [];
 	}
 
 	return createAdapter({
@@ -30,12 +43,14 @@ export function drizzleAdapter(config: { db: { execute: (q: any) => Promise<any>
 		async commit() {},
 		async rollback() {},
 		async ensureMeta() {
+			const sql = await getSql();
 			await run(sql`create table if not exists ${sql.raw('_sync_versions')} (table_name text not null, pk_canonical text not null, version integer not null, primary key (table_name, pk_canonical))`);
 		},
 		async insert(table, row) {
+			const sql = await getSql();
 			const cols = Object.keys(row);
-			const colList = sql.join(cols.map((c) => sql`${sql.raw(c)}`), sql`, `);
-			const values = sql.join(cols.map((c) => sql`${(row as any)[c]}`), sql`, `);
+			const colList = sql.join(cols.map((c: string) => sql`${sql.raw(c)}`), sql`, `);
+			const values = sql.join(cols.map((c: string) => sql`${(row as any)[c]}`), sql`, `);
 			await run(sql`insert into ${sql.raw(table)} (${colList}) values (${values})`);
 			if ((row as any).id != null && typeof (row as any).version === 'number') {
 				await run(sql`insert into ${sql.raw('_sync_versions')} (table_name, pk_canonical, version) values (${table}, ${String((row as any).id)}, ${(row as any).version}) on conflict (table_name, pk_canonical) do update set version = excluded.version`);
@@ -43,10 +58,11 @@ export function drizzleAdapter(config: { db: { execute: (q: any) => Promise<any>
 			return { ...row } as any;
 		},
 		async updateByPk(table, pk, set) {
+			const sql = await getSql();
 			const key = canonicalPk(pk);
 			const cols = Object.keys(set).filter((c) => c !== 'version');
 			if (cols.length > 0) {
-				const assigns = sql.join(cols.map((c) => sql`${sql.raw(c)} = ${(set as any)[c]}`), sql`, `);
+				const assigns = sql.join(cols.map((c: string) => sql`${sql.raw(c)} = ${(set as any)[c]}`), sql`, `);
 				await run(sql`update ${sql.raw(table)} set ${assigns} where id = ${key}`);
 			}
 			if ((set as any).version != null) {
@@ -60,12 +76,14 @@ export function drizzleAdapter(config: { db: { execute: (q: any) => Promise<any>
 			return full;
 		},
 		async deleteByPk(table, pk) {
+			const sql = await getSql();
 			const key = canonicalPk(pk);
 			await run(sql`delete from ${sql.raw(table)} where id = ${key}`);
 			await run(sql`delete from ${sql.raw('_sync_versions')} where table_name = ${table} and pk_canonical = ${key}`);
 			return { ok: true } as const;
 		},
 		async selectByPk(table, pk, selectCols) {
+			const sql = await getSql();
 			const key = canonicalPk(pk);
 			const rows = await select(sql`select * from ${sql.raw(table)} where id = ${key} limit 1`);
 			if (!rows.length) return null;
@@ -76,6 +94,7 @@ export function drizzleAdapter(config: { db: { execute: (q: any) => Promise<any>
 			const out: any = {}; for (const f of selectCols) out[f] = full[f]; return out;
 		},
 		async selectWindow(table, req: any) {
+			const sql = await getSql();
 			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
 			const keys = Object.keys(orderBy);
 			let whereSql = sql``;
@@ -87,7 +106,7 @@ export function drizzleAdapter(config: { db: { execute: (q: any) => Promise<any>
 			}
 			let q = sql`select * from ${sql.raw(table)} ${whereSql}`;
 			if (keys.length > 0) {
-				const ord = sql.join(keys.map((k) => sql`${sql.raw(k)} ${sql.raw((orderBy[k] ?? 'asc').toUpperCase())}`), sql`, `);
+				const ord = sql.join(keys.map((k: string) => sql`${sql.raw(k)} ${sql.raw((orderBy[k] ?? 'asc').toUpperCase())}`), sql`, `);
 				q = sql`${q} order by ${ord}, id asc`;
 			} else {
 				q = sql`${q} order by id asc`;
