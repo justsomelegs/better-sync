@@ -2,22 +2,25 @@ import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
 
 /**
- * Drizzle adapter. Pass only the Drizzle `db` instance. We lazy-import `drizzle-orm`'s `sql` helper.
+ * Drizzle adapter using native query builder (no raw SQL strings required from the user).
+ * Pass the Drizzle `db` and a map of table name -> table schema object.
  */
-export function drizzleAdapter(db: { execute: (q: any) => Promise<any> | any }): DatabaseAdapter {
-	let cachedSql: any | null = null;
-	async function getSql() {
-		if (cachedSql) return cachedSql;
-		try {
-			const mod: any = await import('drizzle-orm');
-			cachedSql = mod.sql;
-			return cachedSql;
-		} catch (e) {
-			const err: any = new Error('drizzle-orm is not installed. Please add drizzle-orm to use drizzleAdapter.');
-			err.code = 'INTERNAL';
-			throw err;
-		}
-	}
+export function drizzleAdapter(config: { db: any; tables: Record<string, any>; idField?: string | Record<string, string> }): DatabaseAdapter {
+	const { db, tables } = config;
+    let cachedOps: any | null = null;
+    async function ops() {
+        if (cachedOps) return cachedOps;
+        try {
+            const mod: any = await import('drizzle-orm');
+            const { eq, gt, asc, desc } = mod;
+            cachedOps = { eq, gt, asc, desc };
+            return cachedOps;
+        } catch (e) {
+            const err: any = new Error('drizzle-orm is not installed. Please add drizzle-orm to use drizzleAdapter.');
+            (err as any).code = 'INTERNAL';
+            throw err;
+        }
+    }
 
 	function canonicalPk(pk: PrimaryKey): string {
 		if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
@@ -27,15 +30,8 @@ export function drizzleAdapter(db: { execute: (q: any) => Promise<any> | any }):
 		return parts.join('|');
 	}
 
-	async function run(q: any) { return await Promise.resolve(db.execute(q)); }
-	async function select(q: any) {
-		const res = await Promise.resolve(db.execute(q));
-		if (Array.isArray(res)) return res as any[];
-		if (res && typeof res === 'object') {
-			if ('rows' in (res as any) && Array.isArray((res as any).rows)) return (res as any).rows;
-			if ('rowsAffected' in (res as any) || 'lastInsertRowid' in (res as any)) return [];
-		}
-		return [];
+	async function execRaw(sql: string, args?: unknown[]) {
+		try { return await Promise.resolve(db.execute?.({ sql, params: args ?? [] }) ?? db.run?.(sql, ...(args ?? [])) ?? db.execute?.(sql) ?? db.run?.(sql)); } catch {}
 	}
 
 	return createAdapter({
@@ -43,77 +39,91 @@ export function drizzleAdapter(db: { execute: (q: any) => Promise<any> | any }):
 		async commit() {},
 		async rollback() {},
 		async ensureMeta() {
-			const sql = await getSql();
-			await run(sql`create table if not exists ${sql.raw('_sync_versions')} (table_name text not null, pk_canonical text not null, version integer not null, primary key (table_name, pk_canonical))`);
+			await execRaw('CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))');
 		},
 		async insert(table, row) {
-			const sql = await getSql();
-			const cols = Object.keys(row);
-			const colList = sql.join(cols.map((c: string) => sql`${sql.raw(c)}`), sql`, `);
-			const values = sql.join(cols.map((c: string) => sql`${(row as any)[c]}`), sql`, `);
-			await run(sql`insert into ${sql.raw(table)} (${colList}) values (${values})`);
-			if ((row as any).id != null && typeof (row as any).version === 'number') {
-				await run(sql`insert into ${sql.raw('_sync_versions')} (table_name, pk_canonical, version) values (${table}, ${String((row as any).id)}, ${(row as any).version}) on conflict (table_name, pk_canonical) do update set version = excluded.version`);
+			const t = tables[table];
+			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
+			const idCol = typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id');
+			await db.insert(t).values(row as any);
+			if ((row as any)[idCol] != null && typeof (row as any).version === 'number') {
+				await execRaw('INSERT INTO _sync_versions (table_name, pk_canonical, version) VALUES (?,?,?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=excluded.version', [table, String((row as any)[idCol]), (row as any).version]);
 			}
 			return { ...row } as any;
 		},
 		async updateByPk(table, pk, set) {
-			const sql = await getSql();
 			const key = canonicalPk(pk);
 			const cols = Object.keys(set).filter((c) => c !== 'version');
+			const t = tables[table];
+			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
+			const { eq } = await ops();
 			if (cols.length > 0) {
-				const assigns = sql.join(cols.map((c: string) => sql`${sql.raw(c)} = ${(set as any)[c]}`), sql`, `);
-				await run(sql`update ${sql.raw(table)} set ${assigns} where id = ${key}`);
+				const values: Record<string, unknown> = {};
+				for (const c of cols) values[c] = (set as any)[c];
+				await db.update(t).set(values).where(eq((t as any)[(typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id'))], key));
 			}
 			if ((set as any).version != null) {
-				await run(sql`insert into ${sql.raw('_sync_versions')} (table_name, pk_canonical, version) values (${table}, ${key}, ${(set as any).version}) on conflict (table_name, pk_canonical) do update set version = excluded.version`);
+				await execRaw('INSERT INTO _sync_versions (table_name, pk_canonical, version) VALUES (?,?,?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=excluded.version', [table, key, (set as any).version]);
 			}
-			const rows = await select(sql`select * from ${sql.raw(table)} where id = ${key} limit 1`);
+			const rows = await db.select().from(t).where(eq((t as any)[(typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id'))], key)).limit(1);
 			if (!rows.length) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
 			const full: any = { ...rows[0] };
-			const v = await select(sql`select version from ${sql.raw('_sync_versions')} where table_name = ${table} and pk_canonical = ${key} limit 1`);
-			if (v.length) full.version = Number((v[0] as any).version);
+			try {
+				const v = await execRaw('SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1', [table, key]);
+				const vrows = Array.isArray(v) ? v : (v && typeof v === 'object' && Array.isArray((v as any).rows) ? (v as any).rows : []);
+				if (vrows.length) full.version = Number((vrows[0] as any).version);
+			} catch {}
 			return full;
 		},
 		async deleteByPk(table, pk) {
-			const sql = await getSql();
+			const t = tables[table];
+			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
 			const key = canonicalPk(pk);
-			await run(sql`delete from ${sql.raw(table)} where id = ${key}`);
-			await run(sql`delete from ${sql.raw('_sync_versions')} where table_name = ${table} and pk_canonical = ${key}`);
+			const { eq } = await ops();
+			await db.delete(t).where(eq((t as any)[(typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id'))], key));
+			await execRaw('DELETE FROM _sync_versions WHERE table_name = ? AND pk_canonical = ?', [table, key]);
 			return { ok: true } as const;
 		},
 		async selectByPk(table, pk, selectCols) {
-			const sql = await getSql();
+			const t = tables[table];
+			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
 			const key = canonicalPk(pk);
-			const rows = await select(sql`select * from ${sql.raw(table)} where id = ${key} limit 1`);
+			const { eq } = await ops();
+			const rows = await db.select().from(t).where(eq((t as any)[(typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id'))], key)).limit(1);
 			if (!rows.length) return null;
 			const full: any = { ...rows[0] };
-			const v = await select(sql`select version from ${sql.raw('_sync_versions')} where table_name = ${table} and pk_canonical = ${key} limit 1`);
-			if (v.length) full.version = Number((v[0] as any).version);
+			try {
+				const v = await execRaw('SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1', [table, key]);
+				const vrows = Array.isArray(v) ? v : (v && typeof v === 'object' && Array.isArray((v as any).rows) ? (v as any).rows : []);
+				if (vrows.length) full.version = Number((vrows[0] as any).version);
+			} catch {}
 			if (!selectCols || selectCols.length === 0) return full;
 			const out: any = {}; for (const f of selectCols) out[f] = full[f]; return out;
 		},
 		async selectWindow(table, req: any) {
-			const sql = await getSql();
+			const t = tables[table];
+			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
 			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
 			const keys = Object.keys(orderBy);
-			let whereSql = sql``;
+			const { gt, asc, desc } = await ops();
+			const idCol = typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id');
+			const whereExprs: any[] = [];
 			if (req.cursor) {
 				try {
 					const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } };
-					if (json?.last?.id) whereSql = sql`where id > ${json.last.id}`;
+					if (json?.last?.id) whereExprs.push(gt((t as any)[idCol], json.last.id));
 				} catch {}
 			}
-			let q = sql`select * from ${sql.raw(table)} ${whereSql}`;
-			if (keys.length > 0) {
-				const ord = sql.join(keys.map((k: string) => sql`${sql.raw(k)} ${sql.raw((orderBy[k] ?? 'asc').toUpperCase())}`), sql`, `);
-				q = sql`${q} order by ${ord}, id asc`;
-			} else {
-				q = sql`${q} order by id asc`;
-			}
 			const limit = typeof req.limit === 'number' ? req.limit : 100;
-			q = sql`${q} limit ${limit}`;
-			const rows = await select(q);
+			const orderExprs = keys.length > 0
+				? keys.map((k) => (orderBy[k] === 'desc' ? desc((t as any)[k]) : asc((t as any)[k]))).concat(asc((t as any)[idCol]))
+				: [asc((t as any)[idCol])];
+			const rows = await db
+				.select()
+				.from(t)
+				.where(whereExprs.length ? whereExprs[0] : undefined)
+				.orderBy(...orderExprs)
+				.limit(limit);
 			let nextCursor: string | null = null;
 			if (rows.length === limit) {
 				const last = rows[rows.length - 1] as any;
