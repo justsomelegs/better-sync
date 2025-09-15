@@ -26,6 +26,7 @@ export interface DatabaseAdapter {
   deleteByPk(table: string, pk: PrimaryKey): Promise<{ ok: true }>;
   selectByPk(table: string, pk: PrimaryKey, select?: string[]): Promise<Record<string, unknown> | null>;
   selectWindow(table: string, req: SelectWindow & { where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
+  ensureMeta?(): Promise<void>;
 }
 
 // Mutator typing helpers (for server and client type-safety)

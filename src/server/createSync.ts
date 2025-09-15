@@ -92,9 +92,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 	// Optional: auto-create minimal tables based on schema (non-destructive)
 	if (config.autoMigrate) {
 		(async () => {
-			for (const name of tableDefs.keys()) {
-				try { await db.selectWindow(name, { limit: 0 }); } catch { /* ignore */ }
-			}
+			try { if (typeof (db as any).ensureMeta === 'function') await (db as any).ensureMeta(); } catch { }
 		})();
 	}
 
