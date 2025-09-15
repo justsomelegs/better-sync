@@ -1,3 +1,13 @@
-*node_modules
-*dist
-*migrations
+node_modules/
+dist/
+migrations/
+
+# Local npm pack artifacts
+just-sync-*.tgz
+
+# SvelteKit examples
+examples/*/.svelte-kit/
+examples/*/build/
+examples/*/.data/
+examples/*/node_modules/
+examples/*/package-lock.json
