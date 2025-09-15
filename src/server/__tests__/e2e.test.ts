@@ -149,6 +149,17 @@ describe('E2E over HTTP', () => {
 			const dataLine = frame.split('\n').find((l) => l.startsWith('data: ')) || '';
 			try { const payload = JSON.parse(dataLine.slice(6)); firstEventId = String(payload?.eventId || ''); } catch {}
 		}
+		// retry reading additional events if id couldn't be parsed
+		let attempts = 0;
+		while (!firstEventId && attempts < 3) {
+			attempts++;
+			await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: `later-${attempts}` } }) });
+			const f2 = await readUntilEvent(sub, 2000);
+			const id2 = (f2.split('\n').find((l) => l.startsWith('id: ')) || '').slice(4).trim();
+			if (id2) { firstEventId = id2; break; }
+			const d2 = f2.split('\n').find((l) => l.startsWith('data: ')) || '';
+			try { const p = JSON.parse(d2.slice(6)); if (p?.eventId) { firstEventId = String(p.eventId); break; } } catch {}
+		}
 		ac2.abort();
 		// reconnect (use Last-Event-ID if available) and expect stream to stay open
 		const resumed = firstEventId
