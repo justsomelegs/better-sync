@@ -68,8 +68,8 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 	let versionCounter = 0;
 	const ulid = monotonicFactory();
 
-	// Schema normalization: map table name -> { schema?: ZodObject<any>, primaryKey?: string[], updatedAt?: string }
-	const tableDefs = new Map<string, { schema?: ZodObject<any>; primaryKey?: string[]; updatedAt?: string }>();
+	// Schema normalization: map table name -> { schema?: ZodObject<any>, primaryKey?: string[], updatedAt?: string, table?: unknown }
+	const tableDefs = new Map<string, { schema?: ZodObject<any>; primaryKey?: string[]; updatedAt?: string; table?: unknown }>();
 	(function normalizeSchema() {
 		const s: any = config.schema as any;
 		if (!s || typeof s !== 'object') return;
@@ -77,15 +77,17 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 			let schema: ZodObject<any> | undefined;
 			let primaryKey: string[] | undefined;
 			let updatedAt: string | undefined;
+			let tableObj: unknown | undefined;
 			if (val && typeof val === 'object' && 'schema' in (val as any)) {
 				const obj = val as any;
 				if (obj.schema && typeof (obj.schema as any).parse === 'function') schema = obj.schema as ZodObject<any>;
 				if (Array.isArray(obj.primaryKey)) primaryKey = obj.primaryKey as string[];
 				if (typeof obj.updatedAt === 'string') updatedAt = String(obj.updatedAt);
+				if (obj.table) tableObj = obj.table;
 			} else if (val && typeof (val as any).parse === 'function') {
 				schema = val as unknown as ZodObject<any>;
 			}
-			tableDefs.set(key, { schema, primaryKey, updatedAt });
+			tableDefs.set(key, { schema, primaryKey, updatedAt, table: tableObj });
 		}
 	})();
 
@@ -94,6 +96,11 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		(async () => {
 			try { if (typeof (db as any).ensureMeta === 'function') await (db as any).ensureMeta(); } catch { }
 		})();
+	}
+
+	// If adapter exposes a resolver hook, bind schema tables by name
+	if (typeof (db as any).__setResolve === 'function') {
+		try { (db as any).__setResolve((name: string) => tableDefs.get(name)?.table); } catch { }
 	}
 
 	function getTableSchema(name: string): ZodObject<any> | undefined {

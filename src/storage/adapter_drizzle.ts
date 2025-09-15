@@ -3,10 +3,11 @@ import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
 
 /**
  * Drizzle adapter using native query builder (no raw SQL strings required from the user).
- * Pass the Drizzle `db` and a map of table name -> table schema object.
+ * Pass only the Drizzle `db`. Table resolution is injected by createSync via a private resolver hook.
  */
-export function drizzleAdapter(config: { db: any; resolve: (tableName: string) => any; idField?: string | Record<string, string> }): DatabaseAdapter {
-	const { db, resolve } = config;
+export function drizzleAdapter(config: { db: any; idField?: string | Record<string, string> }): DatabaseAdapter {
+	const { db } = config;
+	let resolveFn: (tableName: string) => any = () => undefined;
     let cachedOps: any | null = null;
     async function ops() {
         if (cachedOps) return cachedOps;
@@ -34,7 +35,7 @@ export function drizzleAdapter(config: { db: any; resolve: (tableName: string) =
 		try { return await Promise.resolve(db.execute?.({ sql, params: args ?? [] }) ?? db.run?.(sql, ...(args ?? [])) ?? db.execute?.(sql) ?? db.run?.(sql)); } catch {}
 	}
 
-	return createAdapter({
+	const adapter = createAdapter({
 		async begin() {},
 		async commit() {},
 		async rollback() {},
@@ -42,7 +43,7 @@ export function drizzleAdapter(config: { db: any; resolve: (tableName: string) =
 			await execRaw('CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))');
 		},
 		async insert(table, row) {
-			const t = resolve(table);
+			const t = resolveFn(table);
 			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
 			const idCol = typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id');
 			await db.insert(t).values(row as any);
@@ -54,7 +55,7 @@ export function drizzleAdapter(config: { db: any; resolve: (tableName: string) =
 		async updateByPk(table, pk, set) {
 			const key = canonicalPk(pk);
 			const cols = Object.keys(set).filter((c) => c !== 'version');
-			const t = resolve(table);
+			const t = resolveFn(table);
 			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
 			const { eq } = await ops();
 			if (cols.length > 0) {
@@ -76,7 +77,7 @@ export function drizzleAdapter(config: { db: any; resolve: (tableName: string) =
 			return full;
 		},
 		async deleteByPk(table, pk) {
-			const t = resolve(table);
+			const t = resolveFn(table);
 			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
 			const key = canonicalPk(pk);
 			const { eq } = await ops();
@@ -85,7 +86,7 @@ export function drizzleAdapter(config: { db: any; resolve: (tableName: string) =
 			return { ok: true } as const;
 		},
 		async selectByPk(table, pk, selectCols) {
-			const t = resolve(table);
+			const t = resolveFn(table);
 			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
 			const key = canonicalPk(pk);
 			const { eq } = await ops();
@@ -101,7 +102,7 @@ export function drizzleAdapter(config: { db: any; resolve: (tableName: string) =
 			const out: any = {}; for (const f of selectCols) out[f] = full[f]; return out;
 		},
 		async selectWindow(table, req: any) {
-			const t = tables[table];
+			const t = resolveFn(table);
 			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
 			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
 			const keys = Object.keys(orderBy);
@@ -132,5 +133,8 @@ export function drizzleAdapter(config: { db: any; resolve: (tableName: string) =
 			return { data: rows.map((r) => ({ ...r })), nextCursor };
 		}
 	});
+	// attach private resolver setter for createSync to bind schema tables
+	(Object.assign(adapter as any, { __setResolve: (fn: (name: string) => any) => { resolveFn = fn; } }));
+	return adapter;
 }
 
