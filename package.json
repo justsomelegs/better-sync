@@ -1,6 +1,6 @@
 {
   "name": "just-sync",
-  "version": "0.0.0",
+  "version": "0.0.1",
   "description": "Type-safe sync engine MVP (server/client) – ESM-only",
   "type": "module",
   "license": "MIT",
@@ -21,6 +21,10 @@
     "./next-js": {
       "types": "./dist/next-js.d.ts",
       "import": "./dist/next-js.mjs"
+    },
+    "./sveltekit": {
+      "types": "./dist/sveltekit.d.ts",
+      "import": "./dist/sveltekit.mjs"
     }
   },
   "bin": {
@@ -38,7 +42,8 @@
     "coverage": "vitest run --coverage",
     "turbo": "turbo",
     "lint": "biome lint .",
-    "format": "biome format . --write"
+    "format": "biome format . --write",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run build && npm run -s test"
   },
   "engines": {
     "node": ">=18"
