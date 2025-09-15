@@ -17,6 +17,8 @@ export interface IdempotencyStore<V = unknown> {
   release?(key: string): Promise<void> | void;
 }
 
+export type AdapterError = { code: 'CONFLICT' | 'NOT_FOUND' | 'BAD_REQUEST' | 'INTERNAL'; message?: string; details?: unknown };
+
 export interface DatabaseAdapter {
   begin(): Promise<void>;
   commit(): Promise<void>;
@@ -28,6 +30,8 @@ export interface DatabaseAdapter {
   selectWindow(table: string, req: SelectWindow & { where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
   ensureMeta?(): Promise<void>;
 }
+
+export type AdapterFactory = (url: string, opts?: Record<string, unknown>) => Promise<DatabaseAdapter> | DatabaseAdapter;
 
 // Mutator typing helpers (for server and client type-safety)
 export type MutatorSpec<Args, Result> = { args?: unknown } & Record<string, unknown>;

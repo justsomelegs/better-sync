@@ -4,6 +4,22 @@ import initSqlJs from 'sql.js';
 import { promises as fs } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
 
+export async function createAdapterFromUrl(url: string, opts?: Record<string, unknown>): Promise<DatabaseAdapter> {
+  const normalized = (url || '').trim();
+  if (normalized.startsWith('file:') || normalized === 'memory' || normalized.startsWith('sqlite:') || normalized.startsWith('sqlite://')) {
+    // sqlite://memory or memory
+    const sqliteUrl = normalized === 'memory' || normalized.endsWith('memory') ? 'memory' : (normalized.startsWith('sqlite:') ? normalized.replace(/^sqlite:/, 'file:') : normalized);
+    return sqliteAdapter({ url: sqliteUrl });
+  }
+  if (normalized.startsWith('libsql:') || normalized.startsWith('d1:')) {
+    throw new Error('libsql/D1 adapter not implemented yet');
+  }
+  if (normalized.startsWith('postgres:') || normalized.startsWith('postgresql:') || normalized.startsWith('pg:')) {
+    throw new Error('Postgres adapter not implemented yet');
+  }
+  throw new Error(`Unknown adapter for URL: ${url}`);
+}
+
 export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
   // In-memory SQLite via sql.js (sufficient for MVP & tests)
   const filePath = _config.url?.startsWith('file:') ? resolvePath(_config.url.slice('file:'.length)) : null;
