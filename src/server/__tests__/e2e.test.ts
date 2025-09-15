@@ -83,4 +83,20 @@ describe('E2E over HTTP', () => {
     const json = await res.json();
     expect(json).toEqual({ data: [], nextCursor: null });
   });
+
+	it('calls mutator over HTTP end-to-end', async () => {
+		const sync = createSync({ schema: {}, database: makeDb() as any, mutators: {
+			add: { args: undefined, handler: async (_ctx: any, a: { x: number; y: number }) => (a.x + a.y) }
+		}});
+		const server2 = http.createServer(toNodeHandler(sync.handler));
+		await new Promise<void>((resolve) => server2.listen(0, resolve));
+		const addr = server2.address();
+		if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('port');
+		const url = `http://127.0.0.1:${addr.port}`;
+		const res = await fetch(`${url}/mutators/add`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ args: { x: 2, y: 3 } }) });
+		expect(res.ok).toBe(true);
+		const json = await res.json();
+		expect(json.result).toBe(5);
+		await new Promise<void>((resolve) => server2.close(() => resolve()));
+	});
 });
