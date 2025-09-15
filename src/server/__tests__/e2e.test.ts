@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import http from 'node:http';
 import { createSync } from '../../';
 import { toNodeHandler } from 'better-call/node';
+import { z } from 'zod';
 
 function makeDb() {
   return {
@@ -106,7 +107,7 @@ describe('E2E over HTTP', () => {
 		const dbFile = join(tmpdir(), `just_sync_test_${Date.now()}.sqlite`);
 		const dbUrl = `file:${dbFile}`;
 		const { sqliteAdapter } = await import('../../storage/server');
-		const schema = { todos: { schema: { parse: (v: any) => v } as any } };
+		const schema = { todos: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional() }) } };
 		// First server lifecycle: insert some rows
 		let sync1 = createSync({ schema, database: sqliteAdapter({ url: dbUrl }) as any });
 		let server1 = http.createServer(toNodeHandler(sync1.handler));
@@ -116,7 +117,10 @@ describe('E2E over HTTP', () => {
 		let base = `http://127.0.0.1:${addr.port}`;
 		for (let i = 0; i < 5; i++) {
 			const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { id: `t${i}`, title: `t${i}` } }) });
-			expect(res.ok).toBe(true);
+			if (!res.ok) {
+				const t = await res.text();
+				throw new Error(`seed mutate failed: ${res.status} ${t}`);
+			}
 		}
 		await new Promise<void>((resolve) => server1.close(() => resolve()));
 		// Second server lifecycle: ensure rows persisted and SSE resume works
@@ -141,7 +145,10 @@ describe('E2E over HTTP', () => {
 		const sub = await fetch(`${base}/events`, { signal: ac2.signal });
 		let firstEventId: string | null = null;
 		// trigger a mutation
-		await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: 'later' } }) });
+		{
+			const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: 'later' } }) });
+			if (!res.ok) { const t = await res.text(); throw new Error(`trigger mutate failed: ${res.status} ${t}`); }
+		}
 		const frame = await readUntilEvent(sub, 5000);
 		const idLine = frame.split('\n').find((l) => l.startsWith('id: ')) || '';
 		firstEventId = idLine.slice(4).trim();
@@ -153,7 +160,10 @@ describe('E2E over HTTP', () => {
 		let attempts = 0;
 		while (!firstEventId && attempts < 3) {
 			attempts++;
-			await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: `later-${attempts}` } }) });
+			{
+				const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: `later-${attempts}` } }) });
+				if (!res.ok) { const t = await res.text(); throw new Error(`retry mutate failed: ${res.status} ${t}`); }
+			}
 			const f2 = await readUntilEvent(sub, 2000);
 			const id2 = (f2.split('\n').find((l) => l.startsWith('id: ')) || '').slice(4).trim();
 			if (id2) { firstEventId = id2; break; }
