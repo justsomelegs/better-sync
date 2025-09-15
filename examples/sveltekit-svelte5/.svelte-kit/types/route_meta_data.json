@@ -1,0 +1,6 @@
+{
+	"/": [],
+	"/api/sync": [
+		"src/routes/api/sync/+server.ts"
+	]
+}
