@@ -36,9 +36,9 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 	}
 
 	const adapter = createAdapter({
-		async begin() {},
-		async commit() {},
-		async rollback() {},
+		async begin() { await execRaw('BEGIN'); },
+		async commit() { await execRaw('COMMIT'); },
+		async rollback() { await execRaw('ROLLBACK'); },
 		async ensureMeta() {
 			await execRaw('CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))');
 		},
