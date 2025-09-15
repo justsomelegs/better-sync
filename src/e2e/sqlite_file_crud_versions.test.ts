@@ -42,11 +42,12 @@ describe('E2E sqlite file-backed: persistence, CRUD, versions', () => {
 		let selJson: any = await selRes.json();
 		expect(Array.isArray(selJson.data)).toBe(true);
 		expect(selJson.data.length).toBeGreaterThanOrEqual(3);
-		const t0 = selJson.data.find((r: any) => r.id === 't0');
+		const t0 = selJson.data.find((r: any) => r.title === 't0');
 		expect(!!t0).toBe(true);
+		const id0: string = String(t0.id);
 		const v0: number | undefined = t0?.version;
 		// update t0
-		const upRes = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'update', table: 'todos', pk: 't0', set: { title: 't0-updated' } }) });
+		const upRes = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'update', table: 'todos', pk: id0, set: { title: 't0-updated' } }) });
 		expect(upRes.ok).toBe(true);
 		const upJson: any = await upRes.json();
 		expect(upJson.row.title).toBe('t0-updated');
@@ -63,15 +64,15 @@ describe('E2E sqlite file-backed: persistence, CRUD, versions', () => {
 		base = `http://127.0.0.1:${addr.port}`;
 		selRes = await fetch(`${base}/select`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: 'todos', limit: 1000 }) });
 		selJson = await selRes.json();
-		const t0b = selJson.data.find((r: any) => r.id === 't0');
+		const t0b = selJson.data.find((r: any) => r.title === 't0-updated');
 		expect(!!t0b).toBe(true);
 		const v1: number | undefined = t0b?.version;
 		expect((v1 ?? 0)).toBeGreaterThan(v0 ?? 0);
 		// CAS mismatch should 409
-		const casRes = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'update', table: 'todos', pk: 't0', set: { title: 'fail' }, ifVersion: (v1 ?? 1) + 1 }) });
+		const casRes = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'update', table: 'todos', pk: String(t0b.id), set: { title: 'fail' }, ifVersion: (v1 ?? 1) + 1 }) });
 		expect(casRes.status).toBe(409);
 		// delete and verify absence after restart
-		const delRes = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'delete', table: 'todos', pk: 't0' }) });
+		const delRes = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'delete', table: 'todos', pk: String(t0b.id) }) });
 		expect(delRes.ok).toBe(true);
 		await new Promise<void>((resolve) => server3.close(() => resolve()));
 
@@ -83,7 +84,7 @@ describe('E2E sqlite file-backed: persistence, CRUD, versions', () => {
 		base = `http://127.0.0.1:${addr.port}`;
 		const selRes4 = await fetch(`${base}/select`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: 'todos', limit: 1000 }) });
 		const selJson4: any = await selRes4.json();
-		expect(selJson4.data.find((r: any) => r.id === 't0')).toBeUndefined();
+		expect(selJson4.data.find((r: any) => r.title === 't0-updated')).toBeUndefined();
 		await new Promise<void>((resolve) => server4.close(() => resolve()));
 	});
 });
