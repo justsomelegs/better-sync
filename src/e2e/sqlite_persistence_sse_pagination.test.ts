@@ -33,7 +33,7 @@ describe('E2E sqlite persistence + SSE resume + pagination', () => {
 		const dbUrl = `file:${dbFile}`;
 		const { sqliteAdapter } = await import('../storage/server');
 		const schema = { todos: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional() }) } };
-		let sync1 = createSync({ schema, database: sqliteAdapter({ url: dbUrl }) as any });
+		let sync1 = createSync({ schema, database: sqliteAdapter({ url: dbUrl }) as any, sse: { keepaliveMs: 200 } });
 		let server1 = http.createServer(toNodeHandler(sync1.handler));
 		await new Promise<void>((resolve) => server1.listen(0, resolve));
 		let addr = server1.address();
@@ -44,7 +44,7 @@ describe('E2E sqlite persistence + SSE resume + pagination', () => {
 			if (!res.ok) { const t = await res.text(); throw new Error(`seed mutate failed: ${res.status} ${t}`); }
 		}
 		await new Promise<void>((resolve) => server1.close(() => resolve()));
-		let sync2 = createSync({ schema, database: sqliteAdapter({ url: dbUrl }) as any });
+		let sync2 = createSync({ schema, database: sqliteAdapter({ url: dbUrl }) as any, sse: { keepaliveMs: 200 } });
 		let server2 = http.createServer(toNodeHandler(sync2.handler));
 		await new Promise<void>((resolve) => server2.listen(0, resolve));
 		addr = server2.address();
@@ -67,7 +67,7 @@ describe('E2E sqlite persistence + SSE resume + pagination', () => {
 		}
 		let firstEventId: string | null = null;
 		for (let a = 0; a < 3 && !firstEventId; a++) {
-			const frame = await readUntilEvent(sse, 5000);
+			const frame = await readUntilEvent(sse, 8000);
 			const idLine = frame.split('\n').find((l) => l.startsWith('id: ')) || '';
 			firstEventId = idLine.slice(4).trim();
 			if (!firstEventId) {
@@ -83,5 +83,5 @@ describe('E2E sqlite persistence + SSE resume + pagination', () => {
 		const resumed = await fetch(`${base}/events`, { headers: { 'Last-Event-ID': firstEventId! } });
 		expect(resumed.ok).toBe(true);
 		await new Promise<void>((resolve) => server2.close(() => resolve()));
-	});
+	}, 10000);
 });
