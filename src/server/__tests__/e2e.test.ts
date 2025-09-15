@@ -145,6 +145,10 @@ describe('E2E over HTTP', () => {
 		const frame = await readUntilEvent(sub, 5000);
 		const idLine = frame.split('\n').find((l) => l.startsWith('id: ')) || '';
 		firstEventId = idLine.slice(4).trim();
+		if (!firstEventId) {
+			const dataLine = frame.split('\n').find((l) => l.startsWith('data: ')) || '';
+			try { const payload = JSON.parse(dataLine.slice(6)); firstEventId = String(payload?.eventId || ''); } catch {}
+		}
 		ac2.abort();
 		// reconnect (use Last-Event-ID if available) and expect stream to stay open
 		const resumed = firstEventId
