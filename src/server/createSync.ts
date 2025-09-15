@@ -298,7 +298,8 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 			if (e?.code === 'BAD_REQUEST') {
 				return new Response(JSON.stringify({ code: 'BAD_REQUEST', message: e.message ?? 'Bad request', details: e.details ?? {} }), { status: 400, headers });
 			}
-			return new Response(JSON.stringify({ code: 'INTERNAL', message: 'Mutation failed' }), { status: 500, headers });
+			const reqId = (ctx as any)?.headers?.get?.('X-Request-Id') ?? undefined;
+			return new Response(JSON.stringify({ code: 'INTERNAL', message: 'Mutation failed', details: { requestId: reqId } }), { status: 500, headers });
 		}
 	});
 

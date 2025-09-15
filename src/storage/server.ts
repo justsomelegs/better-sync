@@ -3,6 +3,8 @@ import { monotonicFactory } from 'ulid';
 import initSqlJs from 'sql.js';
 import { promises as fs } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import type { LocalStore } from './client';
+import { memory as clientMemory, absurd as clientAbsurd } from './client';
 
 export async function createAdapterFromUrl(url: string, opts?: Record<string, unknown>): Promise<DatabaseAdapter> {
   const normalized = (url || '').trim();
@@ -18,6 +20,16 @@ export async function createAdapterFromUrl(url: string, opts?: Record<string, un
     throw new Error('Postgres adapter not implemented yet');
   }
   throw new Error(`Unknown adapter for URL: ${url}`);
+}
+
+export async function createServerStorage(url: string, opts?: Record<string, unknown>): Promise<DatabaseAdapter> {
+  return createAdapterFromUrl(url, opts);
+}
+
+export async function createClientStorage(kind: 'memory' | 'absurd', opts?: Record<string, unknown>): Promise<LocalStore> {
+  if (kind === 'memory') return clientMemory();
+  if (kind === 'absurd') return clientAbsurd();
+  throw new Error(`Unknown client storage kind: ${kind}`);
 }
 
 export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
