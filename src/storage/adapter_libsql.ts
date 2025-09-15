@@ -1,11 +1,6 @@
 import { createAdapter } from './adapter';
-import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
-
-function canonicalPk(pk: PrimaryKey): string {
-	if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
-	const parts = Object.keys(pk).sort().map((k) => `${k}=${String((pk as any)[k])}`);
-	return parts.join('|');
-}
+import type { DatabaseAdapter } from '../shared/types';
+import { canonicalPk, decodeCursor, encodeCursor, mapSqlErrorToCode } from './utils';
 
 export function libsqlAdapter(config: { url: string; authToken?: string }): DatabaseAdapter {
 	async function getClient() {
@@ -33,7 +28,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			try {
 				await run(sql, cols.map((k) => (row as any)[k]));
 			} catch (e: any) {
-				const err: any = new Error(e?.message || 'insert failed'); err.code = mapLibsqlError(e); err.details = { table }; throw err;
+				const err: any = new Error(e?.message || 'insert failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table }; throw err;
 			}
 			if ((row as any).id != null && typeof (row as any).version === 'number') {
 				const id = String((row as any).id);
@@ -47,7 +42,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			if (cols.length > 0) {
 				const assigns = cols.map((c) => `${c} = ?`).join(',');
 				const sql = `UPDATE ${table} SET ${assigns} WHERE id = ?`;
-				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { const err: any = new Error(e?.message || 'update failed'); err.code = mapLibsqlError(e); err.details = { table, pk: key }; throw err; }
+				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { const err: any = new Error(e?.message || 'update failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table, pk: key }; throw err; }
 			}
 			if ((set as any).version != null) {
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?,?,?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=excluded.version`, [table, key, (set as any).version]);
@@ -79,9 +74,8 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			const keys = Object.keys(orderBy);
 			let where = '';
 			const params: any[] = [];
-			if (req.cursor) {
-				try { const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } }; if (json?.last?.id) { where = 'WHERE id > ?'; params.push(json.last.id); } } catch { }
-			}
+			const { lastId } = decodeCursor(req.cursor);
+			if (lastId) { where = 'WHERE id > ?'; params.push(lastId); }
 			let sql = `SELECT * FROM ${table} ${where}`;
 			if (keys.length > 0) {
 				const ord = keys.map((k) => `${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
@@ -94,10 +88,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			const res = await run(sql, params);
 			const rows = (res.rows || []).map(rowFromLibsql);
 			let nextCursor: string | null = null;
-			if (rows.length === limit) {
-				const last = rows[rows.length - 1];
-				nextCursor = Buffer.from(JSON.stringify({ last: { id: String(last.id) } }), 'utf8').toString('base64');
-			}
+			if (rows.length === limit) { const last = rows[rows.length - 1]; nextCursor = encodeCursor(String((last as any).id)); }
 			return { data: rows, nextCursor };
 		}
 	});
@@ -108,8 +99,4 @@ function rowFromLibsql(row: any): Record<string, unknown> {
 	return { ...row } as any;
 }
 
-function mapLibsqlError(e: any): string {
-	const msg = String(e?.message || '');
-	if (/UNIQUE/i.test(msg)) return 'CONFLICT';
-	return 'INTERNAL';
-}
+// mapSqlErrorToCode is provided by utils

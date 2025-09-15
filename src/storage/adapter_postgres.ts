@@ -1,11 +1,8 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
+import { canonicalPk, decodeCursor, encodeCursor, mapSqlErrorToCode } from './utils';
 
-function canonicalPk(pk: PrimaryKey): string {
-	if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
-	const parts = Object.keys(pk).sort().map((k) => `${k}=${String((pk as any)[k])}`);
-	return parts.join('|');
-}
+// canonicalPk provided by utils
 
 export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 	async function getClient() {
@@ -31,7 +28,7 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 			const cols = Object.keys(row);
 			const placeholders = cols.map((_, i) => `$${i + 1}`).join(',');
 			const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`;
-			try { await run(sql, cols.map((k) => (row as any)[k])); } catch (e: any) { const err: any = new Error(e?.message || 'insert failed'); err.code = mapPgError(e); err.details = { table }; throw err; }
+			try { await run(sql, cols.map((k) => (row as any)[k])); } catch (e: any) { const err: any = new Error(e?.message || 'insert failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table }; throw err; }
 			if ((row as any).id != null && typeof (row as any).version === 'number') {
 				const id = String((row as any).id);
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES ($1,$2,$3) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=EXCLUDED.version`, [table, id, (row as any).version]);
@@ -44,7 +41,7 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 			if (cols.length > 0) {
 				const assigns = cols.map((c, i) => `${c} = $${i + 1}`).join(',');
 				const sql = `UPDATE ${table} SET ${assigns} WHERE id = $${cols.length + 1}`;
-				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { const err: any = new Error(e?.message || 'update failed'); err.code = mapPgError(e); err.details = { table, pk: key }; throw err; }
+				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { const err: any = new Error(e?.message || 'update failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table, pk: key }; throw err; }
 			}
 			if ((set as any).version != null) {
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES ($1,$2,$3) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=EXCLUDED.version`, [table, key, (set as any).version]);
@@ -77,9 +74,8 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 			const keys = Object.keys(orderBy);
 			let where = '';
 			const params: any[] = [];
-			if (req.cursor) {
-				try { const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } }; if (json?.last?.id) { where = 'WHERE id > $1'; params.push(json.last.id); } } catch { }
-			}
+			const { lastId } = decodeCursor(req.cursor);
+			if (lastId) { where = 'WHERE id > $1'; params.push(lastId); }
 			let sql = `SELECT * FROM ${table} ${where}`;
 			if (keys.length > 0) {
 				const ord = keys.map((k) => `${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
@@ -92,17 +88,10 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 			const res = await run(sql, params);
 			const rows = (res.rows || []).map((r) => ({ ...r }));
 			let nextCursor: string | null = null;
-			if (rows.length === limit) {
-				const last = rows[rows.length - 1];
-				nextCursor = Buffer.from(JSON.stringify({ last: { id: String((last as any).id) } }), 'utf8').toString('base64');
-			}
+			if (rows.length === limit) { const last = rows[rows.length - 1]; nextCursor = encodeCursor(String((last as any).id)); }
 			return { data: rows, nextCursor };
 		}
 	});
 }
 
-function mapPgError(e: any): string {
-	const code = String((e && e.code) || '');
-	if (code === '23505') return 'CONFLICT';
-	return 'INTERNAL';
-}
+// unified error mapping handled by utils
