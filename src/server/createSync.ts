@@ -198,7 +198,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 						}
 						const providedId = (r as any).id;
 						const stampedId = chooseStampedId(ulid, providedId);
-						const stamped = { ...r, id: stampedId, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter } as Record<string, unknown>;
+						const stamped = { ...r, id: stampedId, [getUpdatedAtField(body.table)]: Date.now(), version: 1 } as Record<string, unknown>;
 						out.push(await db.insert(body.table, stamped));
 					}
 					result = { rows: out };
@@ -210,7 +210,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 					}
 					const providedId = (body.rows as any).id;
 					const stampedId = chooseStampedId(ulid, providedId);
-					const stamped = { ...body.rows, id: stampedId, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter } as Record<string, unknown>;
+					const stamped = { ...body.rows, id: stampedId, [getUpdatedAtField(body.table)]: Date.now(), version: 1 } as Record<string, unknown>;
 					const row = await db.insert(body.table, stamped);
 					result = { row };
 				}
@@ -221,7 +221,9 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 					const parsed = (tableSchema.partial() as unknown as ZodTypeAny).safeParse(body.set);
 					if (!parsed.success) { const e: any = new Error('Validation failed'); e.code = 'BAD_REQUEST'; e.details = parsed.error.issues; throw e; }
 				}
-				const row = await db.updateByPk(body.table, body.pk, { ...body.set, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter }, { ifVersion: body.ifVersion });
+				const existing = await db.selectByPk(body.table, body.pk);
+				const nextVersion = (existing as any)?.version ? Number((existing as any).version) + 1 : 1;
+				const row = await db.updateByPk(body.table, body.pk, { ...body.set, [getUpdatedAtField(body.table)]: Date.now(), version: nextVersion }, { ifVersion: body.ifVersion });
 				result = { row };
 			}
 			if (body.op === 'upsert') {
@@ -238,7 +240,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 					const id = chooseStampedId(ulid, providedId);
 					const existing = await db.selectByPk(body.table, id);
 					if (!existing) {
-						const stamped = { ...incoming, id, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter } as Record<string, unknown>;
+						const stamped = { ...incoming, id, [getUpdatedAtField(body.table)]: Date.now(), version: 1 } as Record<string, unknown>;
 						out.push(await db.insert(body.table, stamped));
 					} else {
 						const mergeKeys = body.merge;
@@ -246,7 +248,9 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 						const keys = mergeKeys ?? Object.keys(incoming).filter((k) => k !== 'id' && k !== 'updatedAt');
 						const set: Record<string, unknown> = {};
 						for (const k of keys) set[k] = incoming[k];
-						out.push(await db.updateByPk(body.table, id, { ...set, [getUpdatedAtField(body.table)]: Date.now(), version: ++versionCounter }));
+						const cur = await db.selectByPk(body.table, id);
+						const nextVer = (cur as any)?.version ? Number((cur as any).version) + 1 : 1;
+						out.push(await db.updateByPk(body.table, id, { ...set, [getUpdatedAtField(body.table)]: Date.now(), version: nextVer }));
 					}
 				}
 				result = single ? { row: out[0] } : (Array.isArray((body as any).rows) ? { rows: out } : { row: out[0] });
