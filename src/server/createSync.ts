@@ -1,8 +1,10 @@
-import type { DatabaseAdapter, PrimaryKey, IdempotencyStore } from '../shared/types';
 import { createEndpoint, createRouter } from 'better-call';
 import { z } from 'zod';
+import type { DatabaseAdapter, PrimaryKey, IdempotencyStore } from '../shared/types';
 import { createMemoryIdempotencyStore } from '../shared/idempotency';
+import type { ServerMutatorsSpec } from '../shared/types';
 import { monotonicFactory } from 'ulid';
+import { createSseStream } from './sse';
 
 const pkObject = z.record(z.string(), z.union([z.string(), z.number()]));
 const pkSchema = z.union([z.string(), z.number(), pkObject]) satisfies z.ZodType<PrimaryKey>;
@@ -47,11 +49,8 @@ const selectSchema = z.object({
 	cursor: z.union([z.string(), z.null()]).optional()
 });
 
-import type { ServerMutatorsSpec } from '../shared/types';
-import { canonicalPkValue as canonicalPkValueUtil, getUpdatedAtFieldFor } from './utils';
 import type { ZodObject, ZodTypeAny } from 'zod';
 
-// ULID validation (Crockford base32, 26 chars)
 const ULID_RE = /^[0-9A-HJKMNP-TV-Z]{26}$/;
 function isValidUlid(id: unknown): id is string {
 	return typeof id === 'string' && ULID_RE.test(id);
@@ -68,6 +67,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 	const idem: IdempotencyStore = config.idempotencyStore ?? createMemoryIdempotencyStore();
 	let versionCounter = 0;
 	const ulid = monotonicFactory();
+	const sse = createSseStream({ keepaliveMs: config.sse?.keepaliveMs });
 
 	// Schema normalization: map table name -> { schema?: ZodObject<any>, primaryKey?: string[], updatedAt?: string, table?: unknown }
 	const tableDefs = new Map<string, { schema?: ZodObject<any>; primaryKey?: string[]; updatedAt?: string; table?: unknown }>();
@@ -92,14 +92,12 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		}
 	})();
 
-	// Optional: auto-create minimal tables based on schema (non-destructive)
 	if (config.autoMigrate) {
 		(async () => {
 			try { if (typeof (db as any).ensureMeta === 'function') await (db as any).ensureMeta(); } catch { }
 		})();
 	}
 
-	// If adapter exposes a resolver hook, bind schema tables by name
 	if (typeof (db as any).__setResolve === 'function') {
 		try { (db as any).__setResolve((name: string) => tableDefs.get(name)?.table); } catch { }
 	}
@@ -108,78 +106,27 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		return tableDefs.get(name)?.schema;
 	}
 
-	function getUpdatedAtField(name: string): string { return getUpdatedAtFieldFor(tableDefs as any, name); }
-
-	function canonicalPkValue(pk: PrimaryKey): string { return canonicalPkValueUtil(pk); }
-	const subscribers = new Set<(frame: string) => void>();
-	const ring: { id: string; frame: string; ts: number }[] = [];
-	function pruneRing(now: number) {
-		const windowMs = config.sse?.bufferMs ?? 60000;
-		const cap = config.sse?.bufferCap ?? 10000;
-		while (ring.length > 0) {
-			const first = ring[0];
-			if (!first) break;
-			if (now - first.ts > windowMs) ring.shift(); else break;
-		}
-		while (ring.length > cap) ring.shift();
+	function getUpdatedAtField(name: string): string {
+		return tableDefs.get(name)?.updatedAt || 'updatedAt';
 	}
+
+	function canonicalPkValue(pk: PrimaryKey): string {
+		if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
+		const parts = Object.keys(pk).sort().map((k) => `${k}=${String((pk as any)[k])}`);
+		return parts.join('|');
+	}
+
 	function emit(type: 'mutation', data: Record<string, unknown>) {
 		const id = ulid();
 		const payload = { eventId: id, txId: data['txId'], tables: data['tables'] };
 		const frame = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
-		ring.push({ id, frame, ts: Date.now() });
-		pruneRing(Date.now());
-		for (const send of subscribers) {
-			try { send(frame); } catch { }
-		}
+		sse.emit(frame, id, config.sse?.bufferMs ?? 60000, config.sse?.bufferCap ?? 10000);
 	}
 
-	// Endpoints per MVP
 	const getEvents = createEndpoint('/events', { method: 'GET' }, async (ctx) => {
-		const encoder = new TextEncoder();
-		let timer: NodeJS.Timeout | null = null;
-		let send: ((frame: string) => void) | null = null;
-		const stream = new ReadableStream<Uint8Array>({
-			start(controller) {
-				// initial keepalive
-				controller.enqueue(encoder.encode(':keepalive\n\n'));
-				// resume from Last-Event-ID if provided
-				const req = (ctx as unknown as { request?: Request }).request;
-				const since = req?.headers.get('Last-Event-ID') ?? (req ? new URL(req.url).searchParams.get('since') : null);
-				if (since) {
-					const idx = (ring as any).findIndex((e: any) => e.id === since);
-					if (idx >= 0) {
-						for (const e of (ring as any).slice(idx + 1)) controller.enqueue(encoder.encode(e.frame));
-					}
-				}
-				send = (frame: string) => controller.enqueue(encoder.encode(frame));
-				subscribers.add(send);
-				const keepaliveMs = config.sse?.keepaliveMs ?? 15000;
-				timer = setInterval(() => {
-					controller.enqueue(encoder.encode(':keepalive\n\n'));
-				}, keepaliveMs);
-				const signal = req?.signal;
-				if (signal) {
-					signal.addEventListener('abort', () => {
-						if (timer) clearInterval(timer);
-						if (send) subscribers.delete(send);
-						try { controller.close(); } catch { }
-					});
-				}
-			},
-			cancel() {
-				if (timer) clearInterval(timer);
-				if (send) subscribers.delete(send);
-			}
-		});
-		return new Response(stream, {
-			headers: {
-				'Content-Type': 'text/event-stream',
-				'Cache-Control': 'no-cache',
-				'Connection': 'keep-alive',
-				'X-Accel-Buffering': 'no'
-			}
-		});
+		const req = (ctx as unknown as { request?: Request }).request;
+		const since = req?.headers.get('Last-Event-ID') ?? (req ? new URL(req.url).searchParams.get('since') : null) ?? undefined;
+		return createSseStream({ keepaliveMs: config.sse?.keepaliveMs }).handler({ bufferMs: config.sse?.bufferMs ?? 60000, cap: config.sse?.bufferCap ?? 10000, lastEventId: since ?? undefined });
 	});
 
 	const postMutate = createEndpoint('/mutate', {
