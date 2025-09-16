@@ -115,3 +115,30 @@ JSON errors with `{ code, message, details }`. Common codes: `BAD_REQUEST`, `NOT
 
 See `MVP_SPEC.md` for the deeper specification and roadmap.
 
+### Request Context (Auth-ready)
+
+Derive per-request context (user/session/tenant) via `createSync({ context })` and consume it inside mutators:
+
+```ts
+export const sync = createSync({
+  schema,
+  database: sqliteAdapter({ url: 'file:./app.db' }),
+  context: async (req) => {
+    const cookie = req.headers.get('cookie') || '';
+    const session = await myAuth.getSessionFromCookie(cookie);
+    return { userId: session?.user?.id ?? null, roles: session?.user?.roles ?? [] };
+  },
+  mutators: {
+    addTodo: {
+      args: z.object({ title: z.string().min(1) }),
+      handler: async ({ db, ctx }, { title }) => {
+        if (!ctx.userId) throw new SyncError('BAD_REQUEST', 'Unauthenticated');
+        return db.insert('todos', { title, done: false, ownerId: ctx.userId });
+      }
+    }
+  }
+});
+```
+
+See `docs/CONTEXT.md` for a comprehensive guide (JWT, cookies, Clerk/Auth0).
+
