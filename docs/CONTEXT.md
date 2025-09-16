@@ -78,6 +78,63 @@ context: async (req) => {
 }
 ```
 
+#### Better Auth (Next.js App Router)
+
+The Better Auth SDK typically exposes an initialized `auth` instance with helpers to read the current session from a `Request` or cookies. Depending on your setup, one of the following patterns will apply. Replace `~/server/auth` with where you initialize your Better Auth instance.
+
+```ts
+// server/sync.ts
+import { createSync, SyncError } from 'just-sync';
+import { sqliteAdapter } from 'just-sync/storage/server';
+import { z } from 'zod';
+import { auth } from '~/server/auth'; // your Better Auth instance
+
+export const sync = createSync({
+  schema,
+  database: sqliteAdapter({ url: 'file:./app.db' }),
+  context: async (req) => {
+    // Variant A: Better Auth can read from the Request directly
+    try {
+      const session = await auth.getSession?.(req);
+      if (session) return { userId: session.user.id, roles: session.user.roles ?? [] };
+    } catch {}
+
+    // Variant B: derive from cookies (if your helper expects raw cookies)
+    const cookie = req.headers.get('cookie') || '';
+    try {
+      const session = await auth.getSessionFromCookie?.(cookie);
+      if (session) return { userId: session.user.id, roles: session.user.roles ?? [] };
+    } catch {}
+
+    return { userId: null, roles: [] };
+  },
+  mutators: {
+    createNote: {
+      args: z.object({ title: z.string().min(1) }),
+      async handler({ db, ctx }, { title }) {
+        if (!ctx.userId) throw new SyncError('BAD_REQUEST', 'Unauthenticated');
+        return db.insert('notes', {
+          id: undefined,
+          title,
+          ownerId: ctx.userId,
+          updatedAt: Date.now(),
+          version: 1
+        });
+      }
+    }
+  }
+});
+
+// app/api/sync/route.ts (Next.js route handler)
+import { toNextJsHandler } from 'just-sync/next-js';
+import { sync } from '~/server/sync';
+export const { GET, POST } = toNextJsHandler(sync.handler);
+```
+
+Tips:
+- Pick the Better Auth helper that matches your setup (Request-based or cookies-based) and remove the other variant.
+- If roles/permissions are part of the session, include them in `ctx` to enforce mutator-level authorization.
+
 ### Enforcing authorization in mutators
 
 Mutators receive `ctx` so you can enforce fine-grained authorization and multi-tenancy policies:
