@@ -1,6 +1,6 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { sqliteAdapter } from '../dist/storage/server.mjs';
+import { sqliteAdapter } from '../dist/server.mjs';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_sqlite_${Date.now()}.sqlite`);

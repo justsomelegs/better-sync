@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
-import { createSync } from '../dist/server.mjs';
-import { sqliteAdapter } from '../dist/storage/server.mjs';
+import { createSync } from '../dist/index.mjs';
+import { sqliteAdapter } from '../dist/server.mjs';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_select_${Date.now()}.sqlite`);
@@ -28,6 +28,7 @@ console.log(`E2E /select window over ${rows} rows...`);
 const t0 = Date.now();
 let total = 0;
 let cursor = null;
+
 do {
 	const res = await fetch(`${base}/select`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: 'bench_items', limit: 200, cursor }) });
 	if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -35,6 +36,7 @@ do {
 	total += json.data.length;
 	cursor = json.nextCursor;
 } while (cursor);
+
 const ms = Date.now() - t0;
 console.log(`Selected ${total} rows via HTTP in ${ms}ms (${Math.round((total / ms) * 1000)} rows/s)`);
 await new Promise((r) => server.close(() => r()))

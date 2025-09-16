@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
-import { createSync } from '../dist/server.mjs';
-import { sqliteAdapter } from '../dist/storage/server.mjs';
+import { createSync } from '../dist/index.mjs';
+import { sqliteAdapter } from '../dist/server.mjs';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_server_${Date.now()}.sqlite`);

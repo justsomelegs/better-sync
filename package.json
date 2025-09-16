@@ -21,6 +21,22 @@
     "./next-js": {
       "types": "./dist/next-js.d.ts",
       "import": "./dist/next-js.mjs"
+    },
+    "./adapters/drizzle": {
+      "types": "./dist/adapters/drizzle.d.ts",
+      "import": "./dist/adapters/drizzle.mjs"
+    },
+    "./adapters/prisma": {
+      "types": "./dist/adapters/prisma.d.ts",
+      "import": "./dist/adapters/prisma.mjs"
+    },
+    "./adapters/libsql": {
+      "types": "./dist/adapters/libsql.d.ts",
+      "import": "./dist/adapters/libsql.mjs"
+    },
+    "./adapters/postgres": {
+      "types": "./dist/adapters/postgres.d.ts",
+      "import": "./dist/adapters/postgres.mjs"
     }
   },
   "bin": {
