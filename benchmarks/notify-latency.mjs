@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
 import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
+import { Bench } from 'tinybench';
 
 const ITER = Number(process.env.BENCH_NOTIFY_ITER || 100);
 const TIMEOUT_MS = Number(process.env.BENCH_NOTIFY_TIMEOUT || 5000);
@@ -39,37 +40,27 @@ const stop = clientB.watch({ table: 'bench_notes', limit: 1 }, (evt) => {
 }, { initialSnapshot: false, debounceMs: 10 });
 
 console.log(`Benchmarking notify latency over ${ITER} iterations (client.watch)...`);
-for (let i = 0; i < ITER; i++) {
+const bench = new Bench({ iterations: ITER, warmupIterations: 0 });
+bench.add('notify-latency', async () => {
   await new Promise((r) => setTimeout(r, 5));
-  const t0 = process.hrtime.bigint();
+  const start = Date.now();
   const p = new Promise((res, rej) => {
     resolver = res;
     setTimeout(() => rej(new Error('notify timeout')), TIMEOUT_MS);
   });
-  await clientA.insert('bench_notes', { title: `n${i}` });
+  await clientA.insert('bench_notes', { title: `n${Math.random().toString(36).slice(2)}` });
   try {
     await p;
-    const t1 = process.hrtime.bigint();
-    latencies.push(Number(t1 - t0) / 1e6);
+    latencies.push(Date.now() - start);
   } catch (e) {
-    console.warn(`Iteration ${i} timed out waiting for notification`);
+    // swallow to continue iterations
   } finally {
     resolver = null;
   }
-}
-
+});
+await bench.run();
 stop();
-
-if (latencies.length > 0) {
-  latencies.sort((a, b) => a - b);
-  const avg = latencies.reduce((a, b) => a + b, 0) / latencies.length;
-  const p50 = latencies[Math.floor(latencies.length * 0.5)];
-  const p95 = latencies[Math.floor(latencies.length * 0.95)];
-  const p99 = latencies[Math.floor(latencies.length * 0.99)];
-  console.log(`Notify latency (ms): avg=${avg.toFixed(2)} p50=${p50.toFixed(2)} p95=${p95.toFixed(2)} p99=${p99.toFixed(2)} over ${latencies.length}/${ITER} successes`);
-} else {
-  console.log('No successful notification measurements collected');
-}
+console.table(bench.table());
 
 await new Promise((r) => server.close(() => r()));
 

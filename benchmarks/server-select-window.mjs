@@ -5,7 +5,7 @@ import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
 import { createSync } from '../dist/index.mjs';
 import { sqliteAdapter } from '../dist/server.mjs';
-let Tinybench; try { Tinybench = await import('tinybench'); } catch {}
+import { Bench } from 'tinybench';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_select_${Date.now()}.sqlite`);
@@ -26,40 +26,21 @@ if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('no 
 const base = `http://127.0.0.1:${addr.port}`;
 
 console.log(`E2E /select window over ${rows} rows...`);
-if (Tinybench?.Bench) {
-  const bench = new Tinybench.Bench({ iterations: 1 });
-  bench.add('server-select-window', async () => {
-    let cursor = null;
-    let total = 0;
-    do {
-      // eslint-disable-next-line no-await-in-loop
-      const res = await fetch(`${base}/select`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: 'bench_items', limit: 200, cursor }) });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      // eslint-disable-next-line no-await-in-loop
-      const json = await res.json();
-      total += json.data.length;
-      cursor = json.nextCursor;
-    } while (cursor);
-  });
-  await bench.run();
-  const task = bench.tasks[0];
-  const ms = task.result?.sum || 0;
-  const rowsPerSec = Math.round((rows / ms) * 1000);
-  console.log(bench.table());
-  console.log(`Throughput: ${rowsPerSec} rows/s`);
-} else {
-  const t0 = Date.now();
-  let total = 0;
+const bench = new Bench({ iterations: 1, warmupIterations: 0 });
+bench.add('server-select-window', async () => {
   let cursor = null;
+  let total = 0;
   do {
+    // eslint-disable-next-line no-await-in-loop
     const res = await fetch(`${base}/select`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: 'bench_items', limit: 200, cursor }) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // eslint-disable-next-line no-await-in-loop
     const json = await res.json();
     total += json.data.length;
     cursor = json.nextCursor;
   } while (cursor);
-  const ms = Date.now() - t0;
-  console.log(`Selected ${total} rows via HTTP in ${ms}ms (${Math.round((total / ms) * 1000)} rows/s)`);
-}
+});
+await bench.run();
+console.table(bench.table());
 await new Promise((r) => server.close(() => r()))
 
