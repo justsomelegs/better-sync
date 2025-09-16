@@ -32,7 +32,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
 
   // per-table cache and watchers with options
   const cache = new Map<string, Map<string, any>>();
-  const watchers = new Map<string, Set<{ fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number } }>>();
+  const watchers = new Map<string, Set<{ fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number }; status: 'connecting'|'live'|'retrying'; error?: Error; lastData?: any[]; pollTimer?: any }>>();
   function getTable(table: string) {
     let t = cache.get(table);
     if (!t) { t = new Map(); cache.set(table, t); }
@@ -40,7 +40,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   }
   function notify(table: string, evt: WatchEvent) {
     const set = watchers.get(table);
-    if (set) for (const { fn } of set) { try { fn(evt); } catch { } }
+    if (set) for (const entry of set) { try { entry.fn(evt); } catch { } }
   }
 
   async function postJson(path: string, body: unknown) {
@@ -298,12 +298,17 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
                 tableDebounce.delete(tableName);
                 const subs = watchers.get(tableName);
                 if (!subs || subs.size === 0) return;
-                for (const { fn, args } of subs) {
+                for (const entry of subs) {
                   try {
-                    const res = await select({ table: tableName, where: args.where, select: args.select, orderBy: args.orderBy, limit: args.limit });
-                    fn({ table: tableName, data: res.data });
+                    const res = await select({ table: tableName, where: entry.args.where, select: entry.args.select, orderBy: entry.args.orderBy, limit: entry.args.limit });
+                    entry.lastData = res.data;
+                    entry.status = 'live';
+                    entry.error = undefined;
+                    entry.fn({ table: tableName, data: res.data });
                   } catch (e: any) {
-                    fn({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
+                    entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
+                    entry.status = 'retrying';
+                    entry.fn({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
                   }
                 }
               }, delay));
@@ -312,8 +317,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
         }
       }
     } catch (e) {
-      // surface error to all watchers
-      for (const [tableName, subs] of watchers) for (const { fn } of subs) fn({ table: tableName, error: { code: 'INTERNAL', message: String((e as any)?.message || e) } });
+      // surface error to all watchers and mark retrying
+      for (const [tableName, subs] of watchers) for (const entry of subs) { entry.status = 'retrying'; entry.error = e as any; entry.fn({ table: tableName, error: { code: 'INTERNAL', message: String((e as any)?.message || e) } }); }
     } finally {
       sseRunning = false;
       if (watchers.size > 0 && realtimeMode === 'sse') {
@@ -330,7 +335,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     const tableName = typeof table === 'string' ? table : table.table;
     let set = watchers.get(tableName);
     if (!set) { set = new Set(); watchers.set(tableName, set); }
-    const entry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit } };
+    const entry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit }, status: 'connecting' as const };
     set.add(entry);
 
     // initial snapshot (default true)
@@ -340,12 +345,18 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       try {
         if (typeof table === 'string') {
           const win = await select({ table: tableName, limit: 1 });
+          entry.lastData = win.data;
+          entry.status = 'live';
           onChange({ table: tableName, data: win.data });
         } else {
           const res = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+          entry.lastData = res.data;
+          entry.status = 'live';
           onChange({ table: tableName, data: res.data });
         }
       } catch (e: any) {
+        entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
+        entry.status = 'retrying';
         onChange({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
       }
     })();
@@ -359,23 +370,38 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
         try {
           if (typeof table === 'string') {
             const data = await select({ table: tableName, limit: 1 });
+            entry.lastData = data.data;
+            entry.status = 'live';
             onChange({ table: tableName, data: data.data });
           } else {
             const data = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+            entry.lastData = data.data;
+            entry.status = 'live';
             onChange({ table: tableName, data: data.data });
           }
         } catch (e: any) {
+          entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
+          entry.status = 'retrying';
           onChange({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
         }
       }, pollIntervalMs);
     }
 
-    return () => {
-      if (pollTimer) clearInterval(pollTimer);
+    entry.pollTimer = pollTimer;
+    const unsubscribe = () => {
+      if (entry.pollTimer) clearInterval(entry.pollTimer);
       const s = watchers.get(tableName);
       if (s) { s.delete(entry); if (s.size === 0) watchers.delete(tableName); }
       stopSseIfIdle();
     };
+    const handle: any = unsubscribe;
+    Object.defineProperties(handle, {
+      unsubscribe: { value: unsubscribe },
+      status: { get: () => entry.status },
+      error: { get: () => entry.error ?? null },
+      getSnapshot: { value: () => entry.lastData ?? null }
+    });
+    return handle as (() => void) & { unsubscribe: () => void; status: 'connecting'|'live'|'retrying'; error: Error|null; getSnapshot: () => any[]|null };
   }
 
   const local = {
@@ -391,7 +417,21 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     }
   };
 
-  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, rows, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local } as const;
+  function close() {
+    // Abort SSE and clear timers
+    if (sseAC) { try { sseAC.abort(); } catch { } sseAC = null; }
+    sseRunning = false;
+    // Clear table debounce timers
+    for (const [, t] of tableDebounce) { try { clearTimeout(t); } catch { } }
+    tableDebounce.clear();
+    // Unsubscribe all watchers
+    for (const [, set] of watchers) {
+      for (const entry of set) { if (entry.pollTimer) clearInterval(entry.pollTimer); }
+    }
+    watchers.clear();
+  }
+
+  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, rows, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local, close } as const;
   type TableApi = {
     select(args: Omit<SelectArgs, 'table'>): Promise<{ data: any[]; nextCursor: string | null }>;
     insert(row: Record<string, unknown>, opts?: { clientOpId?: string }): Promise<MutationResult>;
