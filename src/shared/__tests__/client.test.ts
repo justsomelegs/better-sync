@@ -77,11 +77,11 @@ describe('client', () => {
 		await new Promise<void>((resolve) => server!.listen(0, resolve));
 		const addr = server.address();
 		if (typeof addr === 'object' && addr && 'port' in addr) baseURL = `http://127.0.0.1:${addr.port}`;
-		const client = createClient({ baseURL, fetch: blockedFetch });
+		const client = createClient({ baseURL, fetch: blockedFetch, realtime: 'poll', pollIntervalMs: 100 });
 		const sel0 = await client.select({ table: 'todos' });
 		expect(sel0.data).toEqual([]);
 		let updated = false;
-		const stop = client.todos.watch((evt) => { if (evt?.data && evt.data.length > 0) updated = true; });
+		const stop = client.todos.watch((evt) => { if (evt?.data && evt.data.length > 0) updated = true; }, { initialSnapshot: true });
 		await client.insert('todos', { title: 'p' });
 		const start = Date.now();
 		while (!updated) {
