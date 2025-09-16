@@ -146,7 +146,7 @@ This plan proposes concrete, non-placeholder enhancements to just-sync’s codeb
 2) Normalize error mapping; assert consistent JSON error envelopes.
 3) Strengthen idempotency behavior and duplication flags for all ops.
 4) Add SSE resume/overflow tests; document reconnect/backoff behavior.
-5) Implement `client.close()` and enrich `watch` handle with `status`, `error`, `getSnapshot`.
+5) Implement `client.close()` and enrich `watch` handle with `status`, `error`, `getSnapshot`. (Done)
 6) Enforce version-aware reconcile in local datastores; add tests.
 7) Enhance CLI DDL generation from schema (PK, updatedAt, indexes); snapshot tests.
 8) Add `createSync({ context })` request context passthrough for auth-ready DX.
