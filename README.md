@@ -103,6 +103,7 @@ Generates:
 
 - SSE with `Last-Event-ID` resume and small ring buffer
 - Client dedupes by event id and performs debounced snapshots per table
+- Optional diffs in mutation events for faster UI updates; see `docs/REALTIME.md`
 
 ### Errors
 

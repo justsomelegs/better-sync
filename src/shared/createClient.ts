@@ -22,7 +22,7 @@ type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number };
 
 type RealtimeMode = 'sse' | 'poll' | 'off';
 
-export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean }) {
+export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
@@ -30,6 +30,9 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   const defaults = { debounceMs: config.defaults?.debounceMs ?? 20, pageLimit: config.defaults?.pageLimit ?? 100 } as const;
   const hooks = { onError: config.hooks?.onError, onRetry: config.hooks?.onRetry } as const;
   const debug = !!config.debug;
+  const baseBackoffMs = config.reconnectBackoff?.baseMs ?? 500;
+  const maxBackoffMs = config.reconnectBackoff?.maxMs ?? 5000;
+  const jitterMs = config.reconnectBackoff?.jitterMs ?? 250;
   let storePromise: Promise<LocalStore> | null = null;
   if (config.datastore) storePromise = Promise.resolve(config.datastore);
   async function getStore(): Promise<LocalStore | null> { return storePromise ? storePromise : null; }
@@ -266,9 +269,11 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     try {
       const headers: Record<string, string> = {};
       if (lastEventId) headers['Last-Event-ID'] = lastEventId;
+      if (debug) { try { console.debug('[just-sync] SSE connect', { lastEventId }); } catch {} }
       const res = await fetchImpl(`${baseURL}/events`, { signal: sseAC.signal, headers });
       if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
       retryAttempt = 0;
+      if (debug) { try { console.debug('[just-sync] SSE connected'); } catch {} }
       const reader = res.body.getReader();
       const td = new TextDecoder();
       let buffer = '';
@@ -357,11 +362,10 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       if (watchers.size > 0 && realtimeMode === 'sse') {
         retryAttempt = Math.min(retryAttempt + 1, 1000);
         if (hooks.onRetry) { try { hooks.onRetry({ attempt: retryAttempt, reason: undefined }); } catch {} }
-        const base = 500;
-        const max = 5000;
-        const exp = Math.min(base * Math.pow(2, retryAttempt - 1), max);
-        const jitter = Math.floor(Math.random() * 250);
-        const delay = Math.min(exp + jitter, max);
+        const exp = Math.min(baseBackoffMs * Math.pow(2, retryAttempt - 1), maxBackoffMs);
+        const jitter = Math.floor(Math.random() * jitterMs);
+        const delay = Math.min(exp + jitter, maxBackoffMs);
+        if (debug) { try { console.debug('[just-sync] SSE retry', { attempt: retryAttempt, delay }); } catch {} }
         setTimeout(() => { if (!sseRunning) startSseIfNeeded(); }, delay);
       }
     }
