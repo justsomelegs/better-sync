@@ -5,6 +5,7 @@ import { createMemoryIdempotencyStore } from '../shared/idempotency';
 import type { ServerMutatorsSpec } from '../shared/types';
 import { monotonicFactory } from 'ulid';
 import { createSseStream } from './sse';
+import { responseFromError, SyncError } from '../shared/errors';
 
 const pkObject = z.record(z.string(), z.union([z.string(), z.number()]));
 const pkSchema = z.union([z.string(), z.number(), pkObject]) satisfies z.ZodType<PrimaryKey>;
@@ -237,18 +238,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 			return result as any;
 		} catch (e: any) {
 			await db.rollback();
-			const headers = { 'Content-Type': 'application/json' };
-			if (e?.code === 'CONFLICT') {
-				return new Response(JSON.stringify({ code: 'CONFLICT', message: e.message ?? 'Conflict', details: e.details ?? {} }), { status: 409, headers });
-			}
-			if (e?.code === 'NOT_FOUND') {
-				return new Response(JSON.stringify({ code: 'NOT_FOUND', message: e.message ?? 'Not found', details: e.details ?? {} }), { status: 404, headers });
-			}
-			if (e?.code === 'BAD_REQUEST') {
-				return new Response(JSON.stringify({ code: 'BAD_REQUEST', message: e.message ?? 'Bad request', details: e.details ?? {} }), { status: 400, headers });
-			}
-			const reqId = (ctx as any)?.headers?.get?.('X-Request-Id') ?? undefined;
-			return new Response(JSON.stringify({ code: 'INTERNAL', message: 'Mutation failed', details: { requestId: reqId } }), { status: 500, headers });
+			return responseFromError(e, { requestId: (ctx as any)?.headers?.get?.('X-Request-Id') });
 		}
 	});
 
@@ -267,16 +257,16 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 	}, async (ctx) => {
 		const name = (ctx.params as any)?.name as string;
 		if (!config.mutators || typeof (config.mutators as any)[name] !== 'object') {
-			return new Response(JSON.stringify({ code: 'NOT_FOUND', message: 'Mutator not found' }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+			return responseFromError(new SyncError('NOT_FOUND', 'Mutator not found'));
 		}
 		const def = (config.mutators as any)[name];
 		if (def?.args && typeof def.args.parse !== 'function') {
-			return new Response(JSON.stringify({ code: 'BAD_REQUEST', message: 'Invalid args schema' }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+			return responseFromError(new SyncError('BAD_REQUEST', 'Invalid args schema'));
 		}
 		let parsed = ctx.body?.args;
 		if (def?.args) {
 			try { parsed = def.args.parse(ctx.body?.args); } catch (e: any) {
-				return new Response(JSON.stringify({ code: 'BAD_REQUEST', message: 'Validation failed', details: e?.issues ?? {} }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+				return responseFromError(new SyncError('BAD_REQUEST', 'Validation failed', e?.issues ?? {}));
 			}
 		}
 		const opId = ctx.body?.clientOpId ?? ulid();
@@ -292,7 +282,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 			return { result } as any;
 		} catch (e) {
 			await db.rollback();
-			return new Response(JSON.stringify({ code: 'INTERNAL', message: 'Mutator failed' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+			return responseFromError(e);
 		}
 	});
 
