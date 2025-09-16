@@ -76,7 +76,6 @@
     "@vitest/coverage-v8": "^3.2.4",
     "esbuild": "^0.25.9",
     "drizzle-orm": "^0.36.0",
-    "@libsql/client": "^0.6.2",
     "turbo": "^2.5.6",
     "typescript": "^5.9.2",
     "unbuild": "^3.6.1",
