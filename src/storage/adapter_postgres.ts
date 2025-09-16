@@ -29,7 +29,7 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 			const cols = Object.keys(row);
 			const placeholders = cols.map((_, i) => `$${i + 1}`).join(',');
 			const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`;
-			try { await run(sql, cols.map((k) => (row as any)[k])); } catch (e: any) { const err: any = new Error(e?.message || 'insert failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table }; throw err; }
+			try { await run(sql, cols.map((k) => (row as any)[k])); } catch (e: any) { throw new SyncError(mapSqlErrorToCode(String(e?.message || '')), e?.message || 'insert failed', { table }); }
 			if ((row as any).id != null && typeof (row as any).version === 'number') {
 				const id = String((row as any).id);
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES ($1,$2,$3) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=EXCLUDED.version`, [table, id, (row as any).version]);
@@ -42,7 +42,7 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 			if (cols.length > 0) {
 				const assigns = cols.map((c, i) => `${c} = $${i + 1}`).join(',');
 				const sql = `UPDATE ${table} SET ${assigns} WHERE id = $${cols.length + 1}`;
-				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { const err: any = new Error(e?.message || 'update failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table, pk: key }; throw err; }
+				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { throw new SyncError(mapSqlErrorToCode(String(e?.message || '')), e?.message || 'update failed', { table, pk: key }); }
 			}
 			if ((set as any).version != null) {
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES ($1,$2,$3) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=EXCLUDED.version`, [table, key, (set as any).version]);

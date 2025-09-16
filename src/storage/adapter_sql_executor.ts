@@ -52,8 +52,7 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 			try {
 				await run(sql, cols.map((k) => (row as any)[k]));
 			} catch (e: any) {
-				const err: any = new SyncError(mapSqlError(e), e?.message || 'insert failed', { table });
-				throw err;
+				throw new SyncError(mapSqlError(e), e?.message || 'insert failed', { table });
 			}
 			if ((row as any).id != null && typeof (row as any).version === 'number') {
 				const id = String((row as any).id);
@@ -71,8 +70,7 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 				try {
 					await run(sql, [...cols.map((c) => (set as any)[c]), key]);
 				} catch (e: any) {
-					const err: any = new SyncError(mapSqlError(e), e?.message || 'update failed', { table, pk: key });
-					throw err;
+					throw new SyncError(mapSqlError(e), e?.message || 'update failed', { table, pk: key });
 				}
 			}
 			if ((set as any).version != null) {

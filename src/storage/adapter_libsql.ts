@@ -28,7 +28,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			try {
 				await run(sql, cols.map((k) => (row as any)[k]));
 			} catch (e: any) {
-				const err: any = new Error(e?.message || 'insert failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table }; throw err;
+				throw new SyncError(mapSqlErrorToCode(String(e?.message || '')), e?.message || 'insert failed', { table });
 			}
 			if ((row as any).id != null && typeof (row as any).version === 'number') {
 				const id = String((row as any).id);
@@ -42,7 +42,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			if (cols.length > 0) {
 				const assigns = cols.map((c) => `${c} = ?`).join(',');
 				const sql = `UPDATE ${table} SET ${assigns} WHERE id = ?`;
-				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { const err: any = new Error(e?.message || 'update failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table, pk: key }; throw err; }
+				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { throw new SyncError(mapSqlErrorToCode(String(e?.message || '')), e?.message || 'update failed', { table, pk: key }); }
 			}
 			if ((set as any).version != null) {
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?,?,?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=excluded.version`, [table, key, (set as any).version]);
