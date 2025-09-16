@@ -13,8 +13,22 @@ export function memory(): LocalStore {
   return {
     async apply(changes) {
       for (const c of changes) {
-        if (c.type === 'insert' && c.row) t(c.table).set(String((c.row as any).id), c.row);
-        if (c.type === 'update' && c.row) t(c.table).set(String((c.row as any).id), { ...(t(c.table).get(String((c.row as any).id)) || {}), ...c.row });
+        if (c.type === 'insert' && c.row) {
+          const id = String((c.row as any).id);
+          const cur = t(c.table).get(id);
+          const incVer = (c.row as any).version as number | undefined;
+          const curVer = (cur as any)?.version as number | undefined;
+          if (cur && curVer != null && incVer != null && incVer <= curVer) continue;
+          t(c.table).set(id, c.row);
+        }
+        if (c.type === 'update' && c.row) {
+          const id = String((c.row as any).id);
+          const cur = t(c.table).get(id);
+          const incVer = (c.row as any).version as number | undefined;
+          const curVer = (cur as any)?.version as number | undefined;
+          if (cur && curVer != null && incVer != null && incVer <= curVer) continue;
+          t(c.table).set(id, { ...(cur || {}), ...c.row });
+        }
         if (c.type === 'delete' && c.pk) t(c.table).delete(String(c.pk as any));
       }
     },
@@ -22,7 +36,15 @@ export function memory(): LocalStore {
     async readByPk(table, pk) { return t(table).get(String(pk)) ?? null; },
     async readWindow(table, q) {
       const arr = Array.from(t(table).values());
-      arr.sort((a,b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+      arr.sort((a,b) => {
+        const av = (a && (a as any).version) ?? 0;
+        const bv = (b && (b as any).version) ?? 0;
+        if (av !== bv) return bv - av;
+        const au = (a && (a as any).updatedAt) ?? 0;
+        const bu = (b && (b as any).updatedAt) ?? 0;
+        if (au !== bu) return bu - au;
+        return String((a as any).id).localeCompare(String((b as any).id));
+      });
       const limit = q?.limit ?? 100;
       const start = q?.cursor ? Math.max(0, arr.findIndex(r => String(r.id) === String(q.cursor)) + 1) : 0;
       const page = arr.slice(start, start + limit);
@@ -81,15 +103,21 @@ export async function absurd(): Promise<LocalStore> {
     },
     async readWindow(table, q) {
       const limit = q?.limit ?? 100;
-      let sql = `SELECT * FROM ${table}`;
+      let base = `SELECT * FROM ${table}`;
       const params: any[] = [];
       if (q?.cursor) {
-        sql += ` WHERE updatedAt < ?`;
+        base += ` WHERE updatedAt < ?`;
         params.push(await getUpdatedAtById(db, table, String(q.cursor)) ?? 0);
       }
-      sql += ` ORDER BY updatedAt DESC, id ASC LIMIT ?`;
+      let sql = `${base} ORDER BY version DESC, updatedAt DESC, id ASC LIMIT ?`;
+      let stmt: any;
+      try {
+        stmt = db.prepare(sql);
+      } catch {
+        sql = `${base} ORDER BY updatedAt DESC, id ASC LIMIT ?`;
+        stmt = db.prepare(sql);
+      }
       params.push(limit);
-      const stmt = db.prepare(sql);
       stmt.bind(params);
       const out: any[] = [];
       while (stmt.step()) out.push(stmt.getAsObject());
