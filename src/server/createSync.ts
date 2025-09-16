@@ -48,6 +48,7 @@ const selectSchema = z.object({
 });
 
 import type { ServerMutatorsSpec } from '../shared/types';
+import { canonicalPkValue as canonicalPkValueUtil } from './utils';
 import type { ZodObject, ZodTypeAny } from 'zod';
 
 // ULID validation (Crockford base32, 26 chars)
@@ -111,11 +112,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		return tableDefs.get(name)?.updatedAt || 'updatedAt';
 	}
 
-	function canonicalPkValue(pk: PrimaryKey): string {
-		if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
-		const parts = Object.keys(pk).sort().map((k) => `${k}=${String((pk as any)[k])}`);
-		return parts.join('|');
-	}
+	function canonicalPkValue(pk: PrimaryKey): string { return canonicalPkValueUtil(pk); }
 	const subscribers = new Set<(frame: string) => void>();
 	const ring: { id: string; frame: string; ts: number }[] = [];
 	function pruneRing(now: number) {

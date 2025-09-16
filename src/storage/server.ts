@@ -1,4 +1,5 @@
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
+import { canonicalPk, decodeCursor, encodeCursor } from './utils';
 import { monotonicFactory } from 'ulid';
 import initSqlJs from 'sql.js';
 import { promises as fs } from 'node:fs';
@@ -121,11 +122,9 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const keys = Object.keys(orderBy);
       let sql = `SELECT t.*, v.version AS __ver FROM ${table} t LEFT JOIN _sync_versions v ON v.table_name = ? AND v.pk_canonical = t.id`;
       const params: any[] = [table];
-      if (req.cursor) {
-        try {
-          const c = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } };
-          if (c?.last?.id) { sql += ` WHERE t.id > ?`; params.push(c.last.id); }
-        } catch { }
+      {
+        const { lastId } = decodeCursor(req.cursor);
+        if (lastId) { sql += ` WHERE t.id > ?`; params.push(lastId); }
       }
       if (keys.length > 0) {
         const ord = keys.map(k => `t.${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
@@ -139,21 +138,18 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const out: any[] = []; while (stmt.step()) { const r = stmt.getAsObject() as any; const { __ver, ...rest } = r; out.push(__ver != null ? { ...rest, version: __ver } : rest); } stmt.free();
       let nextCursor: string | null = null;
       if (out.length === limit) {
-        const last = out[out.length - 1];
+        const last = out[out.length - 1] as any;
+        // Preserve richer cursor shape for compatibility
         const lastKeys: Record<string, string | number> = {};
-        for (const k of keys) lastKeys[k] = (last as any)[k];
-        nextCursor = Buffer.from(JSON.stringify({ table, orderBy, last: { keys: lastKeys, id: String((last as any).id) } }), 'utf8').toString('base64');
+        for (const k of keys) lastKeys[k] = last[k];
+        nextCursor = Buffer.from(JSON.stringify({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } }), 'utf8').toString('base64');
       }
       return { data: out, nextCursor };
     }
   };
 }
 
-function canonicalPk(pk: PrimaryKey): string {
-  if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
-  const parts = Object.keys(pk).sort().map((k) => `${k}=${String(pk[k] as any)}`);
-  return parts.join('|');
-}
+// canonicalPk is provided by utils
 
 export function memoryAdapter(): DatabaseAdapter {
   const tables = new Map<string, Map<string, any>>();
