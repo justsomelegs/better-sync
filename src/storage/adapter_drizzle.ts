@@ -1,5 +1,6 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
+import { SyncError } from '../shared/errors';
 
 /**
  * Drizzle adapter using native query builder (no raw SQL strings required from the user).
@@ -17,7 +18,7 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
             cachedOps = { eq, gt, asc, desc };
             return cachedOps;
         } catch (e) {
-            const err: any = new Error('drizzle-orm is not installed. Please add drizzle-orm to use drizzleAdapter.');
+            const err: any = new SyncError('INTERNAL', 'drizzle-orm is not installed. Please add drizzle-orm to use drizzleAdapter.');
             (err as any).code = 'INTERNAL';
             throw err;
         }
@@ -44,7 +45,7 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 		},
 		async insert(table, row) {
 			const t = resolveFn(table);
-			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
+			if (!t) { throw new SyncError('BAD_REQUEST', `Unknown table: ${table}`); }
 			const idCol = typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id');
 			await db.insert(t).values(row as any);
 			if ((row as any)[idCol] != null && typeof (row as any).version === 'number') {
@@ -56,7 +57,7 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 			const key = canonicalPk(pk);
 			const cols = Object.keys(set).filter((c) => c !== 'version');
 			const t = resolveFn(table);
-			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
+			if (!t) { throw new SyncError('BAD_REQUEST', `Unknown table: ${table}`); }
 			const { eq } = await ops();
 			if (cols.length > 0) {
 				const values: Record<string, unknown> = {};
@@ -67,7 +68,7 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 				await execRaw('INSERT INTO _sync_versions (table_name, pk_canonical, version) VALUES (?,?,?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=excluded.version', [table, key, (set as any).version]);
 			}
 			const rows = await db.select().from(t).where(eq((t as any)[(typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id'))], key)).limit(1);
-			if (!rows.length) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+			if (!rows.length) { throw new SyncError('NOT_FOUND', 'not found'); }
 			const full: any = { ...rows[0] };
 			try {
 				const v = await execRaw('SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1', [table, key]);
@@ -78,7 +79,7 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 		},
 		async deleteByPk(table, pk) {
 			const t = resolveFn(table);
-			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
+			if (!t) { throw new SyncError('BAD_REQUEST', `Unknown table: ${table}`); }
 			const key = canonicalPk(pk);
 			const { eq } = await ops();
 			await db.delete(t).where(eq((t as any)[(typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id'))], key));
@@ -87,7 +88,7 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 		},
 		async selectByPk(table, pk, selectCols) {
 			const t = resolveFn(table);
-			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
+			if (!t) { throw new SyncError('BAD_REQUEST', `Unknown table: ${table}`); }
 			const key = canonicalPk(pk);
 			const { eq } = await ops();
 			const rows = await db.select().from(t).where(eq((t as any)[(typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id'))], key)).limit(1);
@@ -103,7 +104,7 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 		},
 		async selectWindow(table, req: any) {
 			const t = resolveFn(table);
-			if (!t) { const e: any = new Error(`Unknown table: ${table}`); e.code = 'BAD_REQUEST'; throw e; }
+			if (!t) { throw new SyncError('BAD_REQUEST', `Unknown table: ${table}`); }
 			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
 			const keys = Object.keys(orderBy);
 			const { gt, asc, desc } = await ops();

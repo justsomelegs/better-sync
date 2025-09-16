@@ -151,7 +151,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 						const tableSchema = getTableSchema(body.table);
 						if (tableSchema) {
 							const parsed = (tableSchema.partial() as unknown as ZodTypeAny).safeParse(r);
-							if (!parsed.success) { const e: any = new Error('Validation failed'); e.code = 'BAD_REQUEST'; e.details = parsed.error.issues; throw e; }
+							if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 						}
 						const providedId = (r as any).id;
 						const stampedId = chooseStampedId(ulid, providedId);
@@ -163,7 +163,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 					const tableSchema = getTableSchema(body.table);
 					if (tableSchema) {
 						const parsed = (tableSchema.partial() as unknown as ZodTypeAny).safeParse(body.rows);
-						if (!parsed.success) { const e: any = new Error('Validation failed'); e.code = 'BAD_REQUEST'; e.details = parsed.error.issues; throw e; }
+						if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 					}
 					const providedId = (body.rows as any).id;
 					const stampedId = chooseStampedId(ulid, providedId);
@@ -176,7 +176,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 				const tableSchema = getTableSchema(body.table);
 				if (tableSchema) {
 					const parsed = (tableSchema.partial() as unknown as ZodTypeAny).safeParse(body.set);
-					if (!parsed.success) { const e: any = new Error('Validation failed'); e.code = 'BAD_REQUEST'; e.details = parsed.error.issues; throw e; }
+					if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 				}
 				const existing = await db.selectByPk(body.table, body.pk);
 				const nextVersion = (existing as any)?.version ? Number((existing as any).version) + 1 : 1;
@@ -191,7 +191,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 					const tableSchema = getTableSchema(body.table);
 					if (tableSchema) {
 						const parsed = (tableSchema.partial() as unknown as ZodTypeAny).safeParse(incoming);
-						if (!parsed.success) { const e: any = new Error('Validation failed'); e.code = 'BAD_REQUEST'; e.details = parsed.error.issues; throw e; }
+						if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 					}
 					const providedId = (incoming as any).id;
 					const id = chooseStampedId(ulid, providedId);
@@ -201,7 +201,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 						out.push(await db.insert(body.table, stamped));
 					} else {
 						const mergeKeys = body.merge;
-						if (mergeKeys && mergeKeys.length === 0) { const e: any = new Error('insert-only upsert found existing'); e.code = 'CONFLICT'; throw e; }
+						if (mergeKeys && mergeKeys.length === 0) { throw new SyncError('CONFLICT', 'insert-only upsert found existing'); }
 						const keys = mergeKeys ?? Object.keys(incoming).filter((k) => k !== 'id' && k !== 'updatedAt');
 						const set: Record<string, unknown> = {};
 						for (const k of keys) set[k] = incoming[k];

@@ -4,6 +4,7 @@ import { monotonicFactory } from 'ulid';
 import initSqlJs from 'sql.js';
 import { promises as fs } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import { SyncError } from '../shared/errors';
 
 // URL builder intentionally removed to keep adapter DX explicit
 
@@ -46,7 +47,7 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
         s.bind([String(row.id)]);
         const exists = s.step();
         s.free();
-        if (exists) { const e: any = new Error('duplicate'); e.code = 'CONFLICT'; e.details = { constraint: 'unique', column: 'id' }; throw e; }
+        if (exists) { throw new SyncError('CONFLICT', 'duplicate', { constraint: 'unique', column: 'id' }); }
       }
       const cols = Object.keys(row).filter((c) => c !== 'version');
       const placeholders = cols.map(() => '?').join(',');
@@ -64,13 +65,13 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const key = canonicalPk(pk);
       let g: any;
       try { g = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`); }
-      catch (err: any) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      catch (err: any) { throw new SyncError('NOT_FOUND', 'not found'); }
       g.bind([key]); const cur = g.step() ? g.getAsObject() : null; g.free();
-      if (!cur) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!cur) { throw new SyncError('NOT_FOUND', 'not found'); }
       if (opts?.ifVersion != null) {
         const v = db.prepare(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`);
         v.bind([table, key]); const has = v.step(); const metaVer = has ? (v.getAsObject() as any).version : null; v.free();
-        if (metaVer != null && metaVer !== opts.ifVersion) { const e: any = new Error('Version mismatch'); e.code = 'CONFLICT'; e.details = { expectedVersion: opts.ifVersion, actualVersion: metaVer }; throw e; }
+        if (metaVer != null && metaVer !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: metaVer }); }
       }
       const next: any = { ...set };
       const cols = Object.keys(next).filter((c) => c !== 'version');
@@ -83,7 +84,7 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       }
       const out = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
       out.bind([key]); const row = out.step() ? out.getAsObject() : null; out.free();
-      if (!row) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!row) { throw new SyncError('NOT_FOUND', 'not found'); }
       // augment with version from meta
       const v2 = db.prepare(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`);
       v2.bind([table, key]); const has2 = v2.step(); const verOut = has2 ? (v2.getAsObject() as any).version : undefined; v2.free();
@@ -94,9 +95,9 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const key = canonicalPk(pk);
       let s: any;
       try { s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`); }
-      catch (err: any) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      catch (err: any) { throw new SyncError('NOT_FOUND', 'not found'); }
       s.bind([key]); const existed = s.step(); s.free();
-      if (!existed) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!existed) { throw new SyncError('NOT_FOUND', 'not found'); }
       db.run(`DELETE FROM ${table} WHERE id = ?`, [key]);
       db.run(`DELETE FROM _sync_versions WHERE table_name = ? AND pk_canonical = ?`, [table, key]);
       return { ok: true } as const;
@@ -174,9 +175,9 @@ export function memoryAdapter(): DatabaseAdapter {
     async updateByPk(table: string, pk: PrimaryKey, set: Record<string, any>, opts?: { ifVersion?: number }) {
       const t = tables.get(table);
       const key = canonicalPk(pk);
-      if (!t || !t.has(key)) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!t || !t.has(key)) { throw new SyncError('NOT_FOUND', 'not found'); }
       const cur = t.get(key);
-      if (opts?.ifVersion && cur.version !== opts.ifVersion) { const e: any = new Error('Version mismatch'); e.code = 'CONFLICT'; e.details = { expectedVersion: opts.ifVersion, actualVersion: cur.version }; throw e; }
+      if (opts?.ifVersion && cur.version !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: cur.version }); }
       const now = Date.now();
       const out = { ...cur, ...set, updatedAt: now, version: (cur.version ?? 0) + 1 };
       t.set(key, out);
@@ -185,7 +186,7 @@ export function memoryAdapter(): DatabaseAdapter {
     async deleteByPk(table: string, pk: PrimaryKey) {
       const t = tables.get(table);
       const key = canonicalPk(pk);
-      if (!t || !t.has(key)) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!t || !t.has(key)) { throw new SyncError('NOT_FOUND', 'not found'); }
       t.delete(key);
       return { ok: true } as const;
     },

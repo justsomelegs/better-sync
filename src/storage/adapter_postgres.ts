@@ -1,6 +1,7 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
 import { canonicalPk, decodeCursor, encodeCursor, mapSqlErrorToCode } from './utils';
+import { SyncError } from '../shared/errors';
 
 // canonicalPk provided by utils
 
@@ -13,7 +14,7 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 			await c.connect();
 			return c;
 		} catch (e) {
-			const err: any = new Error('pg client not installed or cannot connect.'); err.code = 'INTERNAL'; throw err;
+			const err: any = new SyncError('INTERNAL', 'pg client not installed or cannot connect.'); throw err;
 		}
 	}
 	async function run(sql: string, params?: any[]) {
@@ -47,7 +48,7 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES ($1,$2,$3) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=EXCLUDED.version`, [table, key, (set as any).version]);
 			}
 			const res = await run(`SELECT * FROM ${table} WHERE id = $1 LIMIT 1`, [key]);
-			if (!res.rows || res.rows.length === 0) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+			if (!res.rows || res.rows.length === 0) { throw new SyncError('NOT_FOUND', 'not found'); }
 			const row: any = { ...res.rows[0] };
 			const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = $1 AND pk_canonical = $2 LIMIT 1`, [table, key]);
 			if (vres.rows?.length) row.version = Number(vres.rows[0]?.version);

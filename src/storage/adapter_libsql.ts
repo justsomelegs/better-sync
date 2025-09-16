@@ -1,6 +1,7 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter } from '../shared/types';
 import { canonicalPk, decodeCursor, encodeCursor, mapSqlErrorToCode } from './utils';
+import { SyncError } from '../shared/errors';
 
 export function libsqlAdapter(config: { url: string; authToken?: string }): DatabaseAdapter {
 	async function getClient() {
@@ -8,8 +9,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			const mod: any = await import('@libsql/client');
 			return mod.createClient({ url: config.url, authToken: (config as any).authToken });
 		} catch (e) {
-			const err: any = new Error('libsql client not installed. Please add @libsql/client to dependencies.');
-			(err as any).code = 'INTERNAL';
+			const err: any = new SyncError('INTERNAL', 'libsql client not installed. Please add @libsql/client to dependencies.');
 			throw err;
 		}
 	}
@@ -48,7 +48,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?,?,?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=excluded.version`, [table, key, (set as any).version]);
 			}
 			const res = await run(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`, [key]);
-			if (!res.rows || res.rows.length === 0) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+			if (!res.rows || res.rows.length === 0) { throw new SyncError('NOT_FOUND', 'not found'); }
 			const row: any = rowFromLibsql(res.rows[0]);
 			const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`, [table, key]);
 			if (vres.rows?.length) row.version = Number(rowFromLibsql(vres.rows[0])?.version);

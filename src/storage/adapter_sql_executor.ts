@@ -1,5 +1,6 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
+import { SyncError } from '../shared/errors';
 
 type ParamStyle = 'qmark' | 'positional';
 
@@ -50,9 +51,7 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 			try {
 				await run(sql, cols.map((k) => (row as any)[k]));
 			} catch (e: any) {
-				const err: any = new Error(e?.message || 'insert failed');
-				err.code = mapSqlError(e);
-				err.details = { table };
+				const err: any = new SyncError(mapSqlError(e), e?.message || 'insert failed', { table });
 				throw err;
 			}
 			if ((row as any).id != null && typeof (row as any).version === 'number') {
@@ -71,9 +70,7 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 				try {
 					await run(sql, [...cols.map((c) => (set as any)[c]), key]);
 				} catch (e: any) {
-					const err: any = new Error(e?.message || 'update failed');
-					err.code = mapSqlError(e);
-					err.details = { table, pk: key };
+					const err: any = new SyncError(mapSqlError(e), e?.message || 'update failed', { table, pk: key });
 					throw err;
 				}
 			}
@@ -83,7 +80,7 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 			}
 			const sel = await query(`SELECT * FROM ${table} WHERE id = ${placeholder(0)} LIMIT 1`, [key]);
 			if (!sel.rows || sel.rows.length === 0) {
-				const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e;
+				throw new SyncError('NOT_FOUND', 'not found');
 			}
 			const full = { ...sel.rows[0] } as any;
 			const vres = await query(`SELECT version FROM _sync_versions WHERE table_name = ${placeholder(0)} AND pk_canonical = ${placeholder(1)} LIMIT 1`, [table, key]);
@@ -138,7 +135,7 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 	});
 }
 
-function mapSqlError(e: any): string {
+function mapSqlError(e: any): 'CONFLICT' | 'INTERNAL' {
 	const msg = String(e?.message || '');
 	if (/unique/i.test(msg)) return 'CONFLICT';
 	return 'INTERNAL';
