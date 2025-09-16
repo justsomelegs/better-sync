@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
-import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
+import { createSync, sqliteAdapter } from '../dist/index.mjs';
 
 const ITER = Number(process.env.BENCH_NOTIFY_ITER || 100);
 const TIMEOUT_MS = Number(process.env.BENCH_NOTIFY_TIMEOUT || 5000);
@@ -20,54 +20,63 @@ const addr = server.address();
 if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('no port');
 const baseURL = `http://127.0.0.1:${addr.port}`;
 
-const clientA = createClient({ baseURL, realtime: 'sse' });
-const clientB = createClient({ baseURL, realtime: 'sse' });
+// Seed table by calling HTTP mutate directly
+await fetch(`${baseURL}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'bench_notes', rows: { id: 'seed', title: 'seed' } }) }).catch(() => {});
 
-// Prime server and create table with an initial insert
-await clientA.insert('bench_notes', { title: 'seed' }).catch(() => {});
-await clientA.select({ table: 'bench_notes', limit: 1 });
-await clientB.select({ table: 'bench_notes', limit: 1 });
-// Warm up SSE connections
-await new Promise((r) => setTimeout(r, 500));
+// Create SSE connection to /events
+const res = await fetch(`${baseURL}/events`);
+if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
+const reader = res.body.getReader();
 
 let resolveEvt;
+let sinceId = undefined;
 const latencies = [];
 
-function hasMutationEvent(evt) {
-	if (!evt) return false;
-	if (evt.pks && Array.isArray(evt.pks) && evt.pks.length > 0) return true;
-	if (evt.change && typeof evt.change === 'object' && evt.change.type === 'inserted') return true;
-	if (evt.changes && evt.changes.inserted && Array.isArray(evt.changes.inserted) && evt.changes.inserted.length > 0) return true;
-	return false;
+async function waitForMutation(tableName, deadline) {
+	const decoder = new TextDecoder();
+	let buffer = '';
+	while (Date.now() < deadline) {
+		const { value, done } = await reader.read();
+		if (done) throw new Error('SSE stream closed');
+		buffer += decoder.decode(value, { stream: true });
+		let idx;
+		while ((idx = buffer.indexOf('\n\n')) !== -1) {
+			const frame = buffer.slice(0, idx);
+			buffer = buffer.slice(idx + 2);
+			if (frame.startsWith('id: ')) {
+				const lines = frame.split('\n');
+				let idLine = lines.find((l) => l.startsWith('id: '));
+				let dataLine = lines.find((l) => l.startsWith('data: '));
+				if (idLine && dataLine) {
+					const eventId = idLine.slice(4).trim();
+					const payload = JSON.parse(dataLine.slice(6));
+					sinceId = eventId;
+					if (payload?.tables && Array.isArray(payload.tables)) {
+						const hit = payload.tables.find((t) => t?.name === tableName);
+						if (hit) return;
+					}
+				}
+			}
+		}
+	}
+	throw new Error('notify timeout');
 }
 
-// Single watcher, resolves per-iteration promise
-const stop = clientB.watch('bench_notes', (evt) => {
-	if (hasMutationEvent(evt)) {
-		if (resolveEvt) resolveEvt();
-	}
-});
-
-console.log(`Benchmarking notify latency over ${ITER} iterations...`);
+console.log(`Benchmarking notify latency over ${ITER} iterations (SSE direct)...`);
 for (let i = 0; i < ITER; i++) {
 	await new Promise((r) => setTimeout(r, 5));
 	const t0 = process.hrtime.bigint();
-	const waitForEvt = new Promise((res) => (resolveEvt = res));
-	const timed = Promise.race([
-		waitForEvt,
-		new Promise((_, rej) => setTimeout(() => rej(new Error('notify timeout')), TIMEOUT_MS))
-	]);
-	await clientA.insert('bench_notes', { title: `n${i}` });
+	const deadline = Date.now() + TIMEOUT_MS;
+	// trigger mutation
+	const req = fetch(`${baseURL}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'bench_notes', rows: { title: `n${i}` } }) });
 	try {
-		await timed;
+		await waitForMutation('bench_notes', deadline);
 		const t1 = process.hrtime.bigint();
 		latencies.push(Number(t1 - t0) / 1e6);
 	} catch (e) {
 		console.warn(`Iteration ${i} timed out waiting for notification`);
 	}
 }
-
-stop();
 
 if (latencies.length > 0) {
 	latencies.sort((a, b) => a - b);
