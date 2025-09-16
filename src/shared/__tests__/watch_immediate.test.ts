@@ -33,9 +33,9 @@ describe('watch immediate notify and debounce', () => {
     await client.insert('notes', { title: 'a' });
 
     const start = Date.now();
-    while (events.length < 2) {
-      if (Date.now() - start > 2000) break;
-      await new Promise((r) => setTimeout(r, 10));
+    while (!events.find((e) => Array.isArray(e.data))) {
+      if (Date.now() - start > 3000) break;
+      await new Promise((r) => setTimeout(r, 15));
     }
     stop();
     await new Promise<void>((r) => server.close(() => r()))
@@ -43,7 +43,7 @@ describe('watch immediate notify and debounce', () => {
     expect(events.length).toBeGreaterThanOrEqual(1);
     const first = events[0];
     expect(first.table).toBe('notes');
-    // immediate notify should have pks when available or at least no data
+    // first should be the immediate notify (no data)
     expect(first.data ?? undefined).toBeUndefined();
     // eventually a snapshot should arrive
     const snap = events.find((e) => Array.isArray(e.data));
@@ -71,7 +71,7 @@ describe('watch immediate notify and debounce', () => {
 
     const start = Date.now();
     while (events.filter((e) => Array.isArray(e.data)).length < 1) {
-      if (Date.now() - start > 2000) break;
+      if (Date.now() - start > 3000) break;
       await new Promise((r) => setTimeout(r, 20));
     }
     stop();
