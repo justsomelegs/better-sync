@@ -55,7 +55,7 @@
     "turbo": "turbo",
     "lint": "biome lint .",
     "format": "biome format . --write",
-    "bench": "node benchmarks/adapter-sqlite-insert.mjs && node benchmarks/server-mutate-insert.mjs && node benchmarks/server-select-window.mjs"
+    "bench": "node benchmarks/adapter-sqlite-insert.mjs && node benchmarks/server-mutate-insert.mjs && node benchmarks/server-select-window.mjs && node benchmarks/notify-latency.mjs"
   },
   "engines": {
     "node": ">=18"
