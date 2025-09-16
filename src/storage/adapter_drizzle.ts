@@ -1,6 +1,7 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
 import { SyncError } from '../shared/errors';
+import { decodeWindowCursor, encodeWindowCursor, defaultOrderBy } from './utils';
 
 /**
  * Drizzle adapter using native query builder (no raw SQL strings required from the user).
@@ -105,16 +106,15 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 		async selectWindow(table, req: any) {
 			const t = resolveFn(table);
 			if (!t) { throw new SyncError('BAD_REQUEST', `Unknown table: ${table}`); }
-			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
+			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? defaultOrderBy();
 			const keys = Object.keys(orderBy);
 			const { gt, asc, desc } = await ops();
 			const idCol = typeof config.idField === 'string' ? config.idField : (config.idField?.[table] ?? 'id');
 			const whereExprs: any[] = [];
-			if (req.cursor) {
-				try {
-					const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } };
-					if (json?.last?.id) whereExprs.push(gt((t as any)[idCol], json.last.id));
-				} catch {}
+			const cur = decodeWindowCursor(req.cursor);
+			if (cur.lastId) {
+				// Drizzle lacks composite OR builder access easily in generic form; fallback to id-only gate
+				whereExprs.push(gt((t as any)[idCol], cur.lastId));
 			}
 			const limit = typeof req.limit === 'number' ? req.limit : 100;
 			const orderExprs = keys.length > 0
@@ -129,7 +129,9 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 			let nextCursor: string | null = null;
 			if (rows.length === limit) {
 				const last = rows[rows.length - 1] as any;
-				nextCursor = Buffer.from(JSON.stringify({ last: { id: String(last.id) } }), 'utf8').toString('base64');
+				const lastKeys: Record<string, string | number> = {};
+				for (const k of keys) lastKeys[k] = (last as any)[k];
+				nextCursor = encodeWindowCursor({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } });
 			}
 			return { data: rows.map((r) => ({ ...r })), nextCursor };
 		}

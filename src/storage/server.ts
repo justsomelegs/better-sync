@@ -1,5 +1,5 @@
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
-import { canonicalPk, decodeCursor, encodeCursor } from './utils';
+import { canonicalPk, decodeWindowCursor, encodeWindowCursor } from './utils';
 import { monotonicFactory } from 'ulid';
 import initSqlJs from 'sql.js';
 import { promises as fs } from 'node:fs';
@@ -123,9 +123,19 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const keys = Object.keys(orderBy);
       let sql = `SELECT t.*, v.version AS __ver FROM ${table} t LEFT JOIN _sync_versions v ON v.table_name = ? AND v.pk_canonical = t.id`;
       const params: any[] = [table];
-      {
-        const { lastId } = decodeCursor(req.cursor);
-        if (lastId) { sql += ` WHERE t.id > ?`; params.push(lastId); }
+      const cur = decodeWindowCursor(req.cursor);
+      if (cur.lastId) {
+        if (keys.length === 1 && keys[0] === 'updatedAt' && (orderBy as any).updatedAt === 'desc') {
+          let lastUpdated: number | null = (cur.lastKeys as any)?.updatedAt as any;
+          if (lastUpdated == null) {
+            const s = db.prepare(`SELECT updatedAt FROM ${table} WHERE id = ? LIMIT 1`);
+            s.bind([cur.lastId]); const has = s.step(); const obj = has ? s.getAsObject() as any : {}; s.free();
+            lastUpdated = obj.updatedAt ?? 0;
+          }
+          sql += ` WHERE (t.updatedAt < ?) OR (t.updatedAt = ? AND t.id > ?)`; params.push(lastUpdated, lastUpdated, cur.lastId);
+        } else {
+          sql += ` WHERE t.id > ?`; params.push(cur.lastId);
+        }
       }
       if (keys.length > 0) {
         const ord = keys.map(k => `t.${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
@@ -140,10 +150,9 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       let nextCursor: string | null = null;
       if (out.length === limit) {
         const last = out[out.length - 1] as any;
-        // Preserve richer cursor shape for compatibility
         const lastKeys: Record<string, string | number> = {};
         for (const k of keys) lastKeys[k] = last[k];
-        nextCursor = Buffer.from(JSON.stringify({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } }), 'utf8').toString('base64');
+        nextCursor = encodeWindowCursor({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } });
       }
       return { data: out, nextCursor };
     }
@@ -221,7 +230,7 @@ export function memoryAdapter(): DatabaseAdapter {
       const limit = typeof req.limit === 'number' ? req.limit : 100;
       let start = 0;
       {
-        const { lastId } = decodeCursor(req.cursor);
+        const { lastId } = decodeWindowCursor(req.cursor);
         if (lastId) {
           const idx = rows.findIndex(r => String(r.id) === String(lastId));
           if (idx >= 0) start = idx + 1;
@@ -233,7 +242,7 @@ export function memoryAdapter(): DatabaseAdapter {
         const last = page[page.length - 1] as any;
         const lastKeys: Record<string, string | number> = {};
         for (const k of keys) lastKeys[k] = last[k];
-        nextCursor = Buffer.from(JSON.stringify({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } }), 'utf8').toString('base64');
+        nextCursor = encodeWindowCursor({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } });
       }
       return { data: page, nextCursor };
     }

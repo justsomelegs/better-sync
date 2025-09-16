@@ -1,6 +1,6 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
-import { canonicalPk, decodeCursor, encodeCursor, mapSqlErrorToCode } from './utils';
+import { canonicalPk, decodeWindowCursor, encodeWindowCursor, defaultOrderBy, mapSqlErrorToCode } from './utils';
 import { SyncError } from '../shared/errors';
 
 // canonicalPk provided by utils
@@ -71,25 +71,43 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 			const out: any = {}; for (const f of select) out[f] = full[f]; return out;
 		},
 		async selectWindow(table, req: any) {
-			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
+			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? defaultOrderBy();
 			const keys = Object.keys(orderBy);
 			let where = '';
 			const params: any[] = [];
-			const { lastId } = decodeCursor(req.cursor);
-			if (lastId) { where = 'WHERE id > $1'; params.push(lastId); }
-			let sql = `SELECT * FROM ${table} ${where}`;
+			const cur = decodeWindowCursor(req.cursor);
+			if (cur.lastId) {
+				if (keys.length === 1 && keys[0] === 'updatedAt' && (orderBy as any).updatedAt === 'desc') {
+					let lastUpdated: number | null = (cur.lastKeys as any)?.updatedAt as any;
+					if (lastUpdated == null) {
+						const q = await run(`SELECT updatedAt FROM ${table} WHERE id = $1 LIMIT 1`, [cur.lastId]);
+						lastUpdated = (q.rows && q.rows[0] && (q.rows[0] as any).updatedat) ?? (q.rows[0] as any)?.updatedAt ?? 0;
+					}
+					where = 'WHERE (t.updatedAt < $1) OR (t.updatedAt = $1 AND t.id > $2)';
+					params.push(lastUpdated, cur.lastId);
+				} else {
+					where = 'WHERE t.id > $1';
+					params.push(cur.lastId);
+				}
+			}
+			let sql = `SELECT t.* FROM ${table} t ${where}`;
 			if (keys.length > 0) {
-				const ord = keys.map((k) => `${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
-				sql += ` ORDER BY ${ord}, id ASC`;
+				const ord = keys.map((k) => `t.${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
+				sql += ` ORDER BY ${ord}, t.id ASC`;
 			} else {
-				sql += ` ORDER BY id ASC`;
+				sql += ` ORDER BY t.id ASC`;
 			}
 			const limit = typeof req.limit === 'number' ? req.limit : 100;
 			sql += ` LIMIT $${params.length + 1}`; params.push(limit);
 			const res = await run(sql, params);
 			const rows = (res.rows || []).map((r) => ({ ...r }));
 			let nextCursor: string | null = null;
-			if (rows.length === limit) { const last = rows[rows.length - 1]; nextCursor = encodeCursor(String((last as any).id)); }
+			if (rows.length === limit) {
+				const last = rows[rows.length - 1] as any;
+				const lastKeys: Record<string, string | number> = {};
+				for (const k of keys) lastKeys[k] = last[k];
+				nextCursor = encodeWindowCursor({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } });
+			}
 			return { data: rows, nextCursor };
 		}
 	});

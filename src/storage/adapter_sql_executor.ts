@@ -1,6 +1,7 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
 import { SyncError } from '../shared/errors';
+import { decodeWindowCursor, encodeWindowCursor } from './utils';
 
 type ParamStyle = 'qmark' | 'positional';
 
@@ -108,12 +109,8 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 			const keys = Object.keys(orderBy);
 			let where = '';
 			const params: any[] = [];
-			if (req.cursor) {
-				try {
-					const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } };
-					if (json?.last?.id) { where = `WHERE id > ${placeholder(0)}`; params.push(json.last.id); }
-				} catch {}
-			}
+			const cur = decodeWindowCursor(req.cursor);
+			if (cur.lastId) { where = `WHERE id > ${placeholder(0)}`; params.push(cur.lastId); }
 			let sql = `SELECT * FROM ${table} ${where}`;
 			if (keys.length > 0) {
 				const ord = keys.map((k) => `${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
@@ -128,7 +125,9 @@ export function sqlExecutorAdapter(executor: SqlExecutorConfig): DatabaseAdapter
 			let nextCursor: string | null = null;
 			if (rows.length === limit) {
 				const last = rows[rows.length - 1] as any;
-				nextCursor = Buffer.from(JSON.stringify({ last: { id: String(last.id) } }), 'utf8').toString('base64');
+				const lastKeys: Record<string, string | number> = {};
+				for (const k of keys) lastKeys[k] = last[k];
+				nextCursor = encodeWindowCursor({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } });
 			}
 			return { data: rows, nextCursor };
 		}
