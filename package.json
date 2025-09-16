@@ -38,7 +38,8 @@
     "coverage": "vitest run --coverage",
     "turbo": "turbo",
     "lint": "biome lint .",
-    "format": "biome format . --write"
+    "format": "biome format . --write",
+    "bench": "node benchmarks/adapter-sqlite-insert.mjs && node benchmarks/server-mutate-insert.mjs && node benchmarks/server-select-window.mjs"
   },
   "engines": {
     "node": ">=18"
