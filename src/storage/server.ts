@@ -219,25 +219,20 @@ export function memoryAdapter(): DatabaseAdapter {
       });
       const limit = typeof req.limit === 'number' ? req.limit : 100;
       let start = 0;
-      type CursorJson = { table: string; orderBy: Record<string, 'asc' | 'desc'>; last?: { keys: Record<string, string | number>; id: string } };
-      if (req.cursor) {
-        try {
-          const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as CursorJson;
-          const lastId = json?.last?.id;
-          if (lastId) {
-            const idx = rows.findIndex(r => String(r.id) === String(lastId));
-            if (idx >= 0) start = idx + 1;
-          }
-        } catch { }
+      {
+        const { lastId } = decodeCursor(req.cursor);
+        if (lastId) {
+          const idx = rows.findIndex(r => String(r.id) === String(lastId));
+          if (idx >= 0) start = idx + 1;
+        }
       }
       const page = rows.slice(start, start + limit);
       let nextCursor: string | null = null;
       if ((start + limit) < rows.length && page.length > 0) {
-        const last = page[page.length - 1];
+        const last = page[page.length - 1] as any;
         const lastKeys: Record<string, string | number> = {};
         for (const k of keys) lastKeys[k] = last[k];
-        const c: CursorJson = { table, orderBy, last: { keys: lastKeys, id: String(last.id) } };
-        nextCursor = Buffer.from(JSON.stringify(c), 'utf8').toString('base64');
+        nextCursor = Buffer.from(JSON.stringify({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } }), 'utf8').toString('base64');
       }
       return { data: page, nextCursor };
     }

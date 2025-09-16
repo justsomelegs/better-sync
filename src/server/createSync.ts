@@ -48,7 +48,7 @@ const selectSchema = z.object({
 });
 
 import type { ServerMutatorsSpec } from '../shared/types';
-import { canonicalPkValue as canonicalPkValueUtil } from './utils';
+import { canonicalPkValue as canonicalPkValueUtil, getUpdatedAtFieldFor } from './utils';
 import type { ZodObject, ZodTypeAny } from 'zod';
 
 // ULID validation (Crockford base32, 26 chars)
@@ -108,9 +108,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		return tableDefs.get(name)?.schema;
 	}
 
-	function getUpdatedAtField(name: string): string {
-		return tableDefs.get(name)?.updatedAt || 'updatedAt';
-	}
+	function getUpdatedAtField(name: string): string { return getUpdatedAtFieldFor(tableDefs as any, name); }
 
 	function canonicalPkValue(pk: PrimaryKey): string { return canonicalPkValueUtil(pk); }
 	const subscribers = new Set<(frame: string) => void>();
