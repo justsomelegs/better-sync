@@ -11,7 +11,10 @@ How to run
 1) Build the library so Node can import dist outputs
    npm run build
 
-2) Run the benchmarks
+2) (Recommended) Install Tinybench for nicer stats
+   npm i -D tinybench
+
+3) Run the benchmarks
    npm run bench
 
 Environment variables
@@ -20,5 +23,6 @@ Environment variables
 
 Notes
 - These are micro-benchmarks intended to compare relative performance and detect regressions.
+- If tinybench is not installed, scripts fall back to simple manual timing.
 - Ensure your machine is relatively idle for consistent results.
 
