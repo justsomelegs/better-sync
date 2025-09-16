@@ -1,3 +1,21 @@
+/**
+ * Benchmark: client-select-window
+ *
+ * What it measures
+ * - End-to-end paginated reads using the public client API: client.select({ table, limit, cursor }).
+ * - Iteratively fetches windows until all rows are read; reports average time per window.
+ *
+ * Why we benchmark it
+ * - Models list/feed screens that page through results where cursor-based pagination dominates perceived latency.
+ *
+ * Production relevance
+ * - Highlights server route overhead + adapter read throughput for pagination, useful for sizing limits and estimating
+ *   UI responsiveness under load.
+ *
+ * Tuning
+ * - BENCH_ROWS defines total seeded rows.
+ * - Adjust per-call limit in the body below to evaluate tradeoffs between payload size and round trips.
+ */
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

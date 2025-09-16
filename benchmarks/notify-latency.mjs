@@ -1,3 +1,21 @@
+/**
+ * Benchmark: notify-latency (client.watch)
+ *
+ * What it measures
+ * - End-to-end latency from a mutation (client.insert) to the watcher notification callback firing on another client.
+ * - Uses SSE realtime with immediate notify + debounced snapshot semantics to mirror default client behavior.
+ *
+ * Why we benchmark it
+ * - This is the user-perceived “reactivity” metric for collaborative UI. Lower is better.
+ *
+ * Production relevance
+ * - Numbers here are from a single-process, local loopback environment; real deployments add network RTT and proxying.
+ * - Still useful for detecting regressions in client/server notify pipelines and debounce/resume correctness.
+ *
+ * Tuning
+ * - BENCH_NOTIFY_ITER controls number of iterations (default 2000).
+ * - BENCH_NOTIFY_TIMEOUT caps per-iteration wait time.
+ */
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

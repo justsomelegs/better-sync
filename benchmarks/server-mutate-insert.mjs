@@ -1,3 +1,21 @@
+/**
+ * Benchmark: client-insert-e2e
+ *
+ * What it measures
+ * - End-to-end HTTP insert throughput with the public client API over the running server.
+ * - Validates the full mutate path including validation, stamping, id/version handling, and adapter write.
+ *
+ * Why we benchmark it
+ * - Mirrors how real applications will write data via the client SDK.
+ * - Quantifies per-request overhead in a sequential scenario (no artificial concurrency here).
+ *
+ * Production relevance
+ * - Serves as a conservative baseline. Expect much higher throughput with parallelism (e.g., 10–100 concurrent
+ *   inserts), HTTP keep-alive, and production DB drivers (libsql/postgres) with pooling.
+ *
+ * Tuning
+ * - BENCH_ROWS controls the total inserts performed within the Tinybench task.
+ */
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
