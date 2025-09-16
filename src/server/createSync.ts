@@ -5,6 +5,7 @@ import { createMemoryIdempotencyStore } from '../shared/idempotency';
 import type { ServerMutatorsSpec } from '../shared/types';
 import { monotonicFactory } from 'ulid';
 import { createSseStream } from './sse';
+import { normalizeSchemaObject } from './utils';
 import { responseFromError, SyncError } from '../shared/errors';
 
 const pkObject = z.record(z.string(), z.union([z.string(), z.number()]));
@@ -70,28 +71,8 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 	const ulid = monotonicFactory();
 	const sse = createSseStream({ keepaliveMs: config.sse?.keepaliveMs });
 
-	// Schema normalization: map table name -> { schema?: ZodObject<any>, primaryKey?: string[], updatedAt?: string, table?: unknown }
-	const tableDefs = new Map<string, { schema?: ZodObject<any>; primaryKey?: string[]; updatedAt?: string; table?: unknown }>();
-	(function normalizeSchema() {
-		const s: any = config.schema as any;
-		if (!s || typeof s !== 'object') return;
-		for (const [key, val] of Object.entries(s)) {
-			let schema: ZodObject<any> | undefined;
-			let primaryKey: string[] | undefined;
-			let updatedAt: string | undefined;
-			let tableObj: unknown | undefined;
-			if (val && typeof val === 'object' && 'schema' in (val as any)) {
-				const obj = val as any;
-				if (obj.schema && typeof (obj.schema as any).parse === 'function') schema = obj.schema as ZodObject<any>;
-				if (Array.isArray(obj.primaryKey)) primaryKey = obj.primaryKey as string[];
-				if (typeof obj.updatedAt === 'string') updatedAt = String(obj.updatedAt);
-				if (obj.table) tableObj = obj.table;
-			} else if (val && typeof (val as any).parse === 'function') {
-				schema = val as unknown as ZodObject<any>;
-			}
-			tableDefs.set(key, { schema, primaryKey, updatedAt, table: tableObj });
-		}
-	})();
+	// Schema normalization
+	const tableDefs = normalizeSchemaObject(config.schema);
 
 	if (config.autoMigrate) {
 		(async () => {
@@ -103,8 +84,8 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		try { (db as any).__setResolve((name: string) => tableDefs.get(name)?.table); } catch { }
 	}
 
-	function getTableSchema(name: string): ZodObject<any> | undefined {
-		return tableDefs.get(name)?.schema;
+	function getTableSchema(name: string) {
+		return tableDefs.get(name)?.schema as any;
 	}
 
 	function getUpdatedAtField(name: string): string {
