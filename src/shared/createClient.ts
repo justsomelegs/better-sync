@@ -129,7 +129,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
           const t = getTable(table);
           if (tempId) t.delete(tempId);
           t.set(String(serverRow.id), serverRow);
-          notify(table, { table, pks: [serverRow.id], rowVersions: serverRow.version ? { [serverRow.id]: serverRow.version } : undefined });
+          // suppress notify here to avoid duplicate immediate events; SSE will notify and snapshot will follow
           const ds = await getStore();
           if (ds) await ds.apply([{ table, type: 'insert', row: serverRow }]);
         }
@@ -160,7 +160,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       const json = await res.json();
       if (json?.row) {
         t.set(String(json.row.id ?? key), json.row);
-        notify(table, { table, pks: [json.row.id ?? key], rowVersions: json.row.version ? { [json.row.id]: json.row.version } : undefined });
+        // suppress notify here; SSE mutation will trigger immediate notify + snapshot
         const ds = await getStore();
         if (ds) await ds.apply([{ table, type: 'update', row: json.row }]);
       }
