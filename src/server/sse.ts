@@ -21,14 +21,13 @@ export function createSseStream(config?: SseConfig) {
 		}
 	}
 
-	function handler(opts: { bufferMs: number; cap: number; lastEventId?: string }) {
+	function handler(opts: { bufferMs: number; cap: number; lastEventId?: string; signal?: AbortSignal }) {
+		let timer: NodeJS.Timeout | null = null;
+		let send: ((frame: string) => void) | null = null;
 		return new Response(new ReadableStream<Uint8Array>({
 			start(controller) {
 				const encoder = new TextEncoder();
 				controller.enqueue(encoder.encode(':keepalive\n\n'));
-				let timer: NodeJS.Timeout | null = null;
-				let send: ((frame: string) => void) | null = null;
-				// Replay from Last-Event-ID if provided
 				if (opts.lastEventId) {
 					const idx = ring.findIndex((e) => e.id === opts.lastEventId);
 					if (idx >= 0) {
@@ -38,10 +37,17 @@ export function createSseStream(config?: SseConfig) {
 				send = (frame: string) => controller.enqueue(encoder.encode(frame));
 				subscribers.add(send);
 				timer = setInterval(() => controller.enqueue(encoder.encode(':keepalive\n\n')), config?.keepaliveMs ?? 15000);
-				return () => {
-					if (timer) clearInterval(timer);
-					if (send) subscribers.delete(send);
-				};
+				if (opts.signal) {
+					opts.signal.addEventListener('abort', () => {
+						if (timer) clearInterval(timer);
+						if (send) subscribers.delete(send);
+						try { controller.close(); } catch { }
+					});
+				}
+			},
+			cancel() {
+				if (timer) clearInterval(timer);
+				if (send) subscribers.delete(send);
 			}
 		}), { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' } });
 	}

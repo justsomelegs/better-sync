@@ -126,7 +126,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 	const getEvents = createEndpoint('/events', { method: 'GET' }, async (ctx) => {
 		const req = (ctx as unknown as { request?: Request }).request;
 		const since = req?.headers.get('Last-Event-ID') ?? (req ? new URL(req.url).searchParams.get('since') : null) ?? undefined;
-		return createSseStream({ keepaliveMs: config.sse?.keepaliveMs }).handler({ bufferMs: config.sse?.bufferMs ?? 60000, cap: config.sse?.bufferCap ?? 10000, lastEventId: since ?? undefined });
+		return sse.handler({ bufferMs: config.sse?.bufferMs ?? 60000, cap: config.sse?.bufferCap ?? 10000, lastEventId: since ?? undefined, signal: req?.signal });
 	});
 
 	const postMutate = createEndpoint('/mutate', {
