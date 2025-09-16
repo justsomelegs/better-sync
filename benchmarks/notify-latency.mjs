@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
 import { Bench } from 'tinybench';
 
-const ITER = Number(process.env.BENCH_NOTIFY_ITER || 100);
+const ITER = Number(process.env.BENCH_NOTIFY_ITER || 2000);
 const TIMEOUT_MS = Number(process.env.BENCH_NOTIFY_TIMEOUT || 5000);
 const dbFile = join(tmpdir(), `bench_notify_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
