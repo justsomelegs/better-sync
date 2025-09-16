@@ -7,6 +7,7 @@ import { monotonicFactory } from 'ulid';
 import { createSseStream } from './sse';
 import { normalizeSchemaObject } from './utils';
 import { responseFromError, SyncError } from '../shared/errors';
+import { withRequestId } from './errors_middleware';
 import { buildPostMutate } from './routes/mutate';
 import { buildPostSelect } from './routes/select';
 import { buildPostMutator } from './routes/mutators';
@@ -122,7 +123,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 
 	const handler = router.handler;
 
-	const fetch = async (req: Request): Promise<Response> => handler(req);
+	const fetch = withRequestId(async (req: Request): Promise<Response> => handler(req));
 
-	return { handler, fetch, mutators: (config.mutators ?? ({} as TMutators)) } as const;
+	return { handler: (req: Request) => fetch(req), fetch, mutators: (config.mutators ?? ({} as TMutators)) } as const;
 }

@@ -12,6 +12,7 @@ type SelectArgs = {
 type MutationResult = any;
 
 import type { LocalStore } from '../storage/client';
+import { SyncHttpError } from './errors';
 import type { ClientMutators, MutatorsSpec, ServerMutatorsSpec, ClientMutatorsFromServer } from './types';
 
 type WatchArgs = string | { table: string; where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number };
@@ -21,11 +22,14 @@ type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number };
 
 type RealtimeMode = 'sse' | 'poll' | 'off';
 
-export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number }) {
+export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
   const pollIntervalMs = config.pollIntervalMs ?? 1500;
+  const defaults = { debounceMs: config.defaults?.debounceMs ?? 20, pageLimit: config.defaults?.pageLimit ?? 100 } as const;
+  const hooks = { onError: config.hooks?.onError, onRetry: config.hooks?.onRetry } as const;
+  const debug = !!config.debug;
   let storePromise: Promise<LocalStore> | null = null;
   if (config.datastore) storePromise = Promise.resolve(config.datastore);
   async function getStore(): Promise<LocalStore | null> { return storePromise ? storePromise : null; }
@@ -44,12 +48,23 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   }
 
   async function postJson(path: string, body: unknown) {
-    const res = await fetchImpl(`${baseURL}${path}`, {
+    const url = `${baseURL}${path}`;
+    const started = Date.now();
+    const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (debug) {
+      try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
+    }
+    if (!res.ok) {
+      let payload: any = null;
+      try { payload = await res.json(); } catch {}
+      const err = new SyncHttpError(payload?.code || 'INTERNAL', payload?.message || `HTTP ${res.status}`, res.status, payload?.details);
+      if (hooks.onError) try { hooks.onError(err); } catch {}
+      throw err;
+    }
     return res;
   }
 
@@ -293,7 +308,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
               notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
               // debounce snapshot per table: run per watcher with its args
               if (tableDebounce.get(tableName)) continue;
-              const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? 20;
+              const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? defaults.debounceMs;
               tableDebounce.set(tableName, setTimeout(async () => {
                 tableDebounce.delete(tableName);
                 const subs = watchers.get(tableName);
