@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
 
 const ITER = Number(process.env.BENCH_NOTIFY_ITER || 100);
+const TIMEOUT_MS = Number(process.env.BENCH_NOTIFY_TIMEOUT || 5000);
 const dbFile = join(tmpdir(), `bench_notify_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
 
@@ -26,14 +27,23 @@ const clientB = createClient({ baseURL, realtime: 'sse' });
 await clientA.insert('bench_notes', { title: 'seed' }).catch(() => {});
 await clientA.select({ table: 'bench_notes', limit: 1 });
 await clientB.select({ table: 'bench_notes', limit: 1 });
-await new Promise((r) => setTimeout(r, 300));
+// Warm up SSE connections
+await new Promise((r) => setTimeout(r, 500));
 
 let resolveEvt;
 const latencies = [];
 
+function hasMutationEvent(evt) {
+	if (!evt) return false;
+	if (evt.pks && Array.isArray(evt.pks) && evt.pks.length > 0) return true;
+	if (evt.change && typeof evt.change === 'object' && evt.change.type === 'inserted') return true;
+	if (evt.changes && evt.changes.inserted && Array.isArray(evt.changes.inserted) && evt.changes.inserted.length > 0) return true;
+	return false;
+}
+
 // Single watcher, resolves per-iteration promise
 const stop = clientB.watch('bench_notes', (evt) => {
-	if (evt && (evt.pks?.length || evt.changes || evt.change)) {
+	if (hasMutationEvent(evt)) {
 		if (resolveEvt) resolveEvt();
 	}
 });
@@ -42,22 +52,33 @@ console.log(`Benchmarking notify latency over ${ITER} iterations...`);
 for (let i = 0; i < ITER; i++) {
 	await new Promise((r) => setTimeout(r, 5));
 	const t0 = process.hrtime.bigint();
-	const p = new Promise((res) => (resolveEvt = res));
+	const waitForEvt = new Promise((res) => (resolveEvt = res));
+	const timed = Promise.race([
+		waitForEvt,
+		new Promise((_, rej) => setTimeout(() => rej(new Error('notify timeout')), TIMEOUT_MS))
+	]);
 	await clientA.insert('bench_notes', { title: `n${i}` });
-	await p;
-	const t1 = process.hrtime.bigint();
-	latencies.push(Number(t1 - t0) / 1e6);
+	try {
+		await timed;
+		const t1 = process.hrtime.bigint();
+		latencies.push(Number(t1 - t0) / 1e6);
+	} catch (e) {
+		console.warn(`Iteration ${i} timed out waiting for notification`);
+	}
 }
 
 stop();
 
-latencies.sort((a, b) => a - b);
-const avg = latencies.reduce((a, b) => a + b, 0) / latencies.length;
-const p50 = latencies[Math.floor(latencies.length * 0.5)];
-const p95 = latencies[Math.floor(latencies.length * 0.95)];
-const p99 = latencies[Math.floor(latencies.length * 0.99)];
-
-console.log(`Notify latency (ms): avg=${avg.toFixed(2)} p50=${p50.toFixed(2)} p95=${p95.toFixed(2)} p99=${p99.toFixed(2)}`);
+if (latencies.length > 0) {
+	latencies.sort((a, b) => a - b);
+	const avg = latencies.reduce((a, b) => a + b, 0) / latencies.length;
+	const p50 = latencies[Math.floor(latencies.length * 0.5)];
+	const p95 = latencies[Math.floor(latencies.length * 0.95)];
+	const p99 = latencies[Math.floor(latencies.length * 0.99)];
+	console.log(`Notify latency (ms): avg=${avg.toFixed(2)} p50=${p50.toFixed(2)} p95=${p95.toFixed(2)} p99=${p99.toFixed(2)} over ${latencies.length}/${ITER} successes`);
+} else {
+	console.log('No successful notification measurements collected');
+}
 
 await new Promise((r) => server.close(() => r()));
 
