@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { DatabaseAdapter, IdempotencyStore } from '../../shared/types';
 import { responseFromError, SyncError } from '../../shared/errors';
 
-export function buildPostMutator(db: DatabaseAdapter, mutators: any | undefined, ulid: () => string, idem: IdempotencyStore) {
+export function buildPostMutator(db: DatabaseAdapter, mutators: any | undefined, ulid: () => string, idem: IdempotencyStore, getContext?: (req: Request) => unknown | Promise<unknown>) {
 	return createEndpoint('/mutators/:name', {
 		method: 'POST',
 		body: z.object({ args: z.unknown().optional(), clientOpId: z.string().optional() })
@@ -22,14 +22,17 @@ export function buildPostMutator(db: DatabaseAdapter, mutators: any | undefined,
 				return responseFromError(new SyncError('BAD_REQUEST', 'Validation failed', e?.issues ?? {}));
 			}
 		}
-		const opId = ctx.body?.clientOpId ?? ulid();
+		const req = (ctx as unknown as { request?: Request }).request;
+		const headerKey = req?.headers.get('Idempotency-Key') || undefined;
+		const opId = headerKey ?? ctx.body?.clientOpId ?? ulid();
 		if (await Promise.resolve(idem.has(opId))) {
 			const prev = await Promise.resolve(idem.get(opId));
 			return { ...(typeof prev === 'object' && prev && 'result' in (prev as any) ? (prev as any) : { result: prev }), duplicated: true } as any;
 		}
 		await db.begin();
 		try {
-			const result = await def.handler({ db, ctx: {} }, parsed);
+			const ctxVal = getContext ? await Promise.resolve(getContext(req as Request)) : {};
+			const result = await def.handler({ db, ctx: ctxVal }, parsed);
 			await db.commit();
 			await Promise.resolve(idem.set(opId, { result }));
 			return { result } as any;

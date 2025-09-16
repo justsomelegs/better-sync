@@ -68,7 +68,7 @@ function chooseStampedId(ulidGen: () => string, provided: unknown): string {
 	return (isValidUlid(provided) || looksLikeCompositeCanonical(provided)) ? String(provided) : ulidGen();
 }
 
-export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number }; autoMigrate?: boolean }) {
+export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number }; autoMigrate?: boolean; context?: (req: Request) => unknown | Promise<unknown> }) {
 	const db = config.database;
 	const idem: IdempotencyStore = config.idempotencyStore ?? createMemoryIdempotencyStore();
 	let versionCounter = 0;
@@ -115,9 +115,9 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		return sse.handler({ bufferMs: config.sse?.bufferMs ?? 60000, cap: config.sse?.bufferCap ?? 10000, lastEventId: since ?? undefined, signal: req?.signal });
 	});
 
-	const postMutate = buildPostMutate({ db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit });
+	const postMutate = buildPostMutate({ db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit, getContext: config.context });
 	const postSelect = buildPostSelect(db, selectSchema);
-	const postMutator = buildPostMutator(db, config.mutators, ulid, idem);
+	const postMutator = buildPostMutator(db, config.mutators, ulid, idem, config.context);
 
 	const router = createRouter({ getEvents, postMutate, postSelect, postMutator });
 

@@ -10,5 +10,4 @@ export { createAdapter } from './storage/adapter';
 export { prismaAdapter } from './storage/adapter_prisma';
 export { drizzleAdapter } from './storage/adapter_drizzle';
 // Adapter authoring helpers
-export { createAdapter } from './storage/adapter';
 export { canonicalPk, decodeWindowCursor, encodeWindowCursor } from './storage/utils';

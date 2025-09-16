@@ -11,6 +11,7 @@ export function buildPostMutate(deps: {
 	ulid: () => string;
 	idem: IdempotencyStore;
 	emit: (type: 'mutation', data: Record<string, unknown>) => void;
+  getContext?: (req: Request) => unknown | Promise<unknown>;
 }) {
 	const { db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit } = deps;
 	return createEndpoint('/mutate', {
@@ -18,7 +19,9 @@ export function buildPostMutate(deps: {
 		body: mutateSchema
 	}, async (ctx) => {
 		const body = ctx.body as any;
-		const opId = body.clientOpId ?? ulid();
+		const req = (ctx as unknown as { request?: Request }).request;
+		const headerKey = req?.headers.get('Idempotency-Key') || undefined;
+		const opId = headerKey ?? body.clientOpId ?? ulid();
 		if (body.op === 'insert' || body.op === 'upsert') {
 			const rows = Array.isArray(body.rows) ? body.rows : (body.row ? [body.row] : (body.rows ? [body.rows] : []));
 			if (rows.length > 100) { throw new SyncError('BAD_REQUEST', 'Max batch size exceeded', { max: 100 }); }
