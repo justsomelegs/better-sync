@@ -7,6 +7,8 @@ export { sqliteAdapter } from './storage/server';
 export { postgresAdapter } from './storage/adapter_postgres';
 export { libsqlAdapter } from './storage/adapter_libsql';
 export { createAdapter } from './storage/adapter';
-export { sqlExecutorAdapter } from './storage/adapter_sql_executor';
 export { prismaAdapter } from './storage/adapter_prisma';
 export { drizzleAdapter } from './storage/adapter_drizzle';
+// Adapter authoring helpers
+export { createAdapter } from './storage/adapter';
+export { canonicalPk, decodeWindowCursor, encodeWindowCursor } from './storage/utils';
