@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
-import { createSync } from '../dist/index.mjs';
+import { createSync, createClient } from '../dist/index.mjs';
 import { sqliteAdapter } from '../dist/server.mjs';
 import { Bench } from 'tinybench';
 
@@ -25,19 +25,17 @@ const addr = server.address();
 if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('no port');
 const base = `http://127.0.0.1:${addr.port}`;
 
-console.log(`E2E /select window over ${rows} rows...`);
+const client = createClient({ baseURL: base, realtime: 'off' });
+console.log(`E2E client.select window over ${rows} rows...`);
 const bench = new Bench({ iterations: 1, warmupIterations: 0 });
-bench.add('server-select-window', async () => {
+bench.add('client-select-window', async () => {
   let cursor = null;
   let total = 0;
   do {
     // eslint-disable-next-line no-await-in-loop
-    const res = await fetch(`${base}/select`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: 'bench_items', limit: 200, cursor }) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    // eslint-disable-next-line no-await-in-loop
-    const json = await res.json();
-    total += json.data.length;
-    cursor = json.nextCursor;
+    const res = await client.select({ table: 'bench_items', limit: 200, cursor });
+    total += res.data.length;
+    cursor = res.nextCursor;
   } while (cursor);
 });
 await bench.run();

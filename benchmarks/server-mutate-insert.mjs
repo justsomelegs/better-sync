@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
-import { createSync } from '../dist/index.mjs';
+import { createSync, createClient } from '../dist/index.mjs';
 import { sqliteAdapter } from '../dist/server.mjs';
 import { Bench } from 'tinybench';
 
@@ -20,15 +20,15 @@ const addr = server.address();
 if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('no port');
 const base = `http://127.0.0.1:${addr.port}`;
 
-console.log(`E2E /mutate insert ${rows} rows...`);
+const client = createClient({ baseURL: base, realtime: 'off' });
+console.log(`E2E client.insert ${rows} rows...`);
 const bench = new Bench({ iterations: 1, warmupIterations: 0 });
 let run = 0;
-bench.add('server-mutate-insert', async () => {
+bench.add('client-insert-e2e', async () => {
   const runId = run++;
   for (let i = 0; i < rows; i++) {
     // eslint-disable-next-line no-await-in-loop
-    const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'bench_items', rows: { id: `s${runId}-${i}`, name: `n${runId}-${i}` } }) });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    await client.insert('bench_items', { id: `s${runId}-${i}`, name: `n${runId}-${i}` });
   }
 });
 await bench.run();
