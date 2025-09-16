@@ -14,24 +14,33 @@ type MutationResult = any;
 import type { LocalStore } from '../storage/client';
 import type { ClientMutators, MutatorsSpec, ServerMutatorsSpec, ClientMutatorsFromServer } from './types';
 
-export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators }) {
+type WatchArgs = string | { table: string; where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number };
+type WatchEvent = { table: string; pks?: (string | number | Record<string, unknown>)[]; rowVersions?: Record<string, number>; data?: any[]; error?: { code: string; message: string } };
+
+type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number };
+
+type RealtimeMode = 'sse' | 'poll' | 'off';
+
+export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
+  const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
+  const pollIntervalMs = config.pollIntervalMs ?? 1500;
   let storePromise: Promise<LocalStore> | null = null;
   if (config.datastore) storePromise = Promise.resolve(config.datastore);
   async function getStore(): Promise<LocalStore | null> { return storePromise ? storePromise : null; }
 
-  // simple per-table cache and watchers
+  // per-table cache and watchers with options
   const cache = new Map<string, Map<string, any>>();
-  const watchers = new Map<string, Set<(evt: { table: string; pks?: any[]; rowVersions?: Record<string, number> }) => void>>();
+  const watchers = new Map<string, Set<{ fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number } }>>();
   function getTable(table: string) {
     let t = cache.get(table);
     if (!t) { t = new Map(); cache.set(table, t); }
     return t;
   }
-  function notify(table: string, evt: { table: string; pks?: any[]; rowVersions?: Record<string, number> }) {
+  function notify(table: string, evt: WatchEvent) {
     const set = watchers.get(table);
-    if (set) for (const fn of set) { try { fn(evt); } catch { } }
+    if (set) for (const { fn } of set) { try { fn(evt); } catch { } }
   }
 
   async function postJson(path: string, body: unknown) {
@@ -60,24 +69,45 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   }
 
   async function select(args: SelectArgs): Promise<{ data: any[]; nextCursor: string | null }> {
-    // try local first if present and no filters
     const ds = await getStore();
-    if (ds && !args.where) {
-      const win = await ds.readWindow(args.table, { limit: args.limit, orderBy: args.orderBy, cursor: args.cursor ?? null });
-      return { data: win.data, nextCursor: win.nextCursor };
+    if (!args.where) {
+      if (ds) {
+        const win = await ds.readWindow(args.table, { limit: args.limit, orderBy: args.orderBy, cursor: args.cursor ?? null });
+        return { data: win.data, nextCursor: win.nextCursor };
+      }
+      const res = await postJson('/select', args);
+      const json = await res.json();
+      if (!args.cursor) {
+        const t = getTable(args.table);
+        for (const row of json.data) t.set(String(row.id), row);
+        if (ds) await ds.apply(json.data.map((r: any) => ({ table: args.table, type: 'insert', row: r })));
+      }
+      return json;
     }
-    const res = await postJson('/select', args);
-    const json = await res.json();
-    if (!args.cursor && !args.where) {
-      const t = getTable(args.table);
-      for (const row of json.data) t.set(String(row.id), row);
-      if (ds) await ds.apply(json.data.map((r: any) => ({ table: args.table, type: 'insert', row: r })));
+    // where provided: client-side filtering using paginated windows from server/datastore
+    const predicate = args.where as (row: any) => boolean;
+    const pageSize = args.limit ?? 100;
+    const orderBy = args.orderBy;
+    const collected: any[] = [];
+    let cursor: string | null | undefined = args.cursor ?? undefined;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const win = ds
+        ? await ds.readWindow(args.table, { limit: pageSize, orderBy, cursor: cursor ?? null })
+        : await postJson('/select', { table: args.table, select: args.select, orderBy, limit: pageSize, cursor }).then(r => r.json());
+      const rows = (win as any).data as any[];
+      for (const r of rows) if (predicate(r)) collected.push(r);
+      if (collected.length >= pageSize) break;
+      cursor = (win as any).nextCursor ?? null;
+      if (!cursor) break;
     }
-    return json;
+    const data = collected.slice(0, pageSize);
+    const nextCursor = collected.length > pageSize ? String(data[data.length - 1]?.id ?? '') : (cursor ?? null);
+    return { data, nextCursor };
   }
 
+  // optimistic mutation helpers unchanged ...
   async function insert(table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { clientOpId?: string }) {
-    // optimistic single-row insert
     let tempId: string | null = null;
     if (!Array.isArray(rows)) {
       const provided = (rows as any)?.id;
@@ -99,7 +129,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
           const t = getTable(table);
           if (tempId) t.delete(tempId);
           t.set(String(serverRow.id), serverRow);
-          notify(table, { table, pks: [serverRow.id], rowVersions: serverRow.version ? { [serverRow.id]: serverRow.version } : undefined });
+          // suppress notify here to avoid duplicate immediate events; SSE will notify and snapshot will follow
           const ds = await getStore();
           if (ds) await ds.apply([{ table, type: 'insert', row: serverRow }]);
         }
@@ -130,7 +160,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       const json = await res.json();
       if (json?.row) {
         t.set(String(json.row.id ?? key), json.row);
-        notify(table, { table, pks: [json.row.id ?? key], rowVersions: json.row.version ? { [json.row.id]: json.row.version } : undefined });
+        // suppress notify here; SSE mutation will trigger immediate notify + snapshot
         const ds = await getStore();
         if (ds) await ds.apply([{ table, type: 'update', row: json.row }]);
       }
@@ -204,65 +234,138 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     return json.result as any;
   }
 
-  function watch(table: string, onChange: (evt: { table: string; pks?: (string | number | Record<string, unknown>)[]; rowVersions?: Record<string, number> }) => void) {
-    // register local watcher
-    let set = watchers.get(table);
-    if (!set) { set = new Set(); watchers.set(table, set); }
-    set.add(onChange as any);
+  // Shared SSE connection and debounce
+  let sseAC: AbortController | null = null;
+  let sseRunning = false;
+  let lastEventId: string | null = null;
+  const seenEventIds = new Set<string>();
+  const tableDebounce = new Map<string, any>();
 
-    const ac = new AbortController();
-    let backoffMs = 500;
-    let lastEventId: string | null = null;
-    let stopped = false;
-
-    async function start() {
-      try {
-        const headers: Record<string, string> = {};
-        if (lastEventId) headers['Last-Event-ID'] = lastEventId;
-        const res = await fetchImpl(`${baseURL}/events`, { signal: ac.signal, headers });
-        if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
-        const reader = res.body.getReader();
-        const td = new TextDecoder();
-        let buffer = '';
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (!value) continue;
-          buffer += td.decode(value);
-          const frames = buffer.split('\n\n');
-          buffer = frames.pop() || '';
-          for (const f of frames) {
-            if (f.startsWith(':')) continue; // keepalive
-            const idLine = f.split('\n').find((l) => l.startsWith('id: '));
-            if (idLine) lastEventId = idLine.slice(4).trim();
-            if (f.includes('event: mutation')) {
-              const lines = f.split('\n');
-              const dataLine = lines.find((l) => l.startsWith('data: ')) || '';
-              const json = dataLine.slice(6);
-              try {
-                const payload = JSON.parse(json) as { tables: { name: string; pks?: any[]; rowVersions?: Record<string, number> }[] };
-                for (const t of payload.tables) {
-                  if (t.name === table) onChange({ table: t.name, pks: t.pks, rowVersions: t.rowVersions });
+  async function startSseIfNeeded() {
+    if (sseRunning || realtimeMode !== 'sse') return;
+    if (watchers.size === 0) return;
+    sseAC = new AbortController();
+    sseRunning = true;
+    try {
+      const headers: Record<string, string> = {};
+      if (lastEventId) headers['Last-Event-ID'] = lastEventId;
+      const res = await fetchImpl(`${baseURL}/events`, { signal: sseAC.signal, headers });
+      if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
+      const reader = res.body.getReader();
+      const td = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        buffer += td.decode(value);
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() || '';
+        for (const f of frames) {
+          if (f.startsWith(':')) continue; // keepalive
+          const idLine = f.split('\n').find((l) => l.startsWith('id: '));
+          if (idLine) {
+            const eid = idLine.slice(4).trim();
+            lastEventId = eid;
+            if (seenEventIds.has(eid)) continue;
+            seenEventIds.add(eid);
+          }
+          if (f.includes('event: mutation')) {
+            const dataLine = f.split('\n').find((l) => l.startsWith('data: '));
+            if (!dataLine) continue;
+            let payload: any = {};
+            try { payload = JSON.parse(dataLine.slice(6)); } catch { }
+            const tables = Array.isArray(payload.tables) ? payload.tables : [];
+            for (const t of tables) {
+              const tableName = t?.name as string;
+              if (!tableName || !watchers.has(tableName)) continue;
+              // immediate notify
+              notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              // debounce snapshot per table: run per watcher with its args
+              if (tableDebounce.get(tableName)) continue;
+              const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? 20;
+              tableDebounce.set(tableName, setTimeout(async () => {
+                tableDebounce.delete(tableName);
+                const subs = watchers.get(tableName);
+                if (!subs || subs.size === 0) return;
+                for (const { fn, args } of subs) {
+                  try {
+                    const res = await select({ table: tableName, where: args.where, select: args.select, orderBy: args.orderBy, limit: args.limit });
+                    fn({ table: tableName, data: res.data });
+                  } catch (e: any) {
+                    fn({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
+                  }
                 }
-              } catch { }
+              }, delay));
             }
           }
         }
-        // normal end -> retry
-        if (!stopped) scheduleRetry();
-      } catch {
-        if (!stopped) scheduleRetry();
+      }
+    } catch (e) {
+      // surface error to all watchers
+      for (const [tableName, subs] of watchers) for (const { fn } of subs) fn({ table: tableName, error: { code: 'INTERNAL', message: String((e as any)?.message || e) } });
+    } finally {
+      sseRunning = false;
+      if (watchers.size > 0 && realtimeMode === 'sse') {
+        setTimeout(() => { if (!sseRunning) startSseIfNeeded(); }, 500);
       }
     }
+  }
 
-    function scheduleRetry() {
-      const delay = backoffMs;
-      backoffMs = Math.min(backoffMs * 2, 5000);
-      setTimeout(() => { if (!stopped) start(); }, delay);
+  function stopSseIfIdle() {
+    if (watchers.size === 0 && sseAC) { try { sseAC.abort(); } catch { } sseAC = null; sseRunning = false; }
+  }
+
+  function watch(table: WatchArgs, onChange: (evt: WatchEvent) => void, opts?: WatchOptions) {
+    const tableName = typeof table === 'string' ? table : table.table;
+    let set = watchers.get(tableName);
+    if (!set) { set = new Set(); watchers.set(tableName, set); }
+    const entry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit } };
+    set.add(entry);
+
+    // initial snapshot (default true)
+    const initialSnapshot = opts?.initialSnapshot !== false;
+    (async () => {
+      if (!initialSnapshot) return;
+      try {
+        if (typeof table === 'string') {
+          const win = await select({ table: tableName, limit: 1 });
+          onChange({ table: tableName, data: win.data });
+        } else {
+          const res = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+          onChange({ table: tableName, data: res.data });
+        }
+      } catch (e: any) {
+        onChange({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
+      }
+    })();
+
+    // subscribe based on realtime mode
+    let pollTimer: any = null;
+    if (realtimeMode === 'sse') {
+      startSseIfNeeded();
+    } else if (realtimeMode === 'poll') {
+      pollTimer = setInterval(async () => {
+        try {
+          if (typeof table === 'string') {
+            const data = await select({ table: tableName, limit: 1 });
+            onChange({ table: tableName, data: data.data });
+          } else {
+            const data = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+            onChange({ table: tableName, data: data.data });
+          }
+        } catch (e: any) {
+          onChange({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
+        }
+      }, pollIntervalMs);
     }
 
-    start();
-    return () => { stopped = true; ac.abort(); set!.delete(onChange as any); };
+    return () => {
+      if (pollTimer) clearInterval(pollTimer);
+      const s = watchers.get(tableName);
+      if (s) { s.delete(entry); if (s.size === 0) watchers.delete(tableName); }
+      stopSseIfIdle();
+    };
   }
 
   const local = {
@@ -278,13 +381,13 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     }
   };
 
-  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, row: Record<string, unknown>, opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, row, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local } as const;
+  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, rows, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local } as const;
   type TableApi = {
     select(args: Omit<SelectArgs, 'table'>): Promise<{ data: any[]; nextCursor: string | null }>;
     insert(row: Record<string, unknown>, opts?: { clientOpId?: string }): Promise<MutationResult>;
     update(pk: string | number | Record<string, string | number>, set: Record<string, unknown>, opts?: { ifVersion?: number; clientOpId?: string }): Promise<MutationResult>;
     delete(pk: string | number | Record<string, string | number>, opts?: { clientOpId?: string }): Promise<{ ok: true }>;
-    upsert(row: Record<string, unknown>, opts?: { merge?: string[]; clientOpId?: string }): Promise<any>;
+    upsert(rows: Record<string, unknown> | Record<string, unknown>[], opts?: { merge?: string[]; clientOpId?: string }): Promise<any>;
     watch(onChange: (evt: { table: string; pks?: any[]; rowVersions?: Record<string, number> }) => void): () => void;
     updateWhere(where: (row: any) => boolean, changes: { set: Record<string, unknown> }, opts?: { clientOpId?: string }): Promise<{ ok: number; pks: any[]; failed: any[] }>;
     deleteWhere(where: (row: any) => boolean, opts?: { clientOpId?: string }): Promise<{ ok: number; pks: any[]; failed: any[] }>;
@@ -295,14 +398,13 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       insert(row, opts) { return insert(name, row, opts); },
       update(pk, set, opts) { return update(name, pk, set, opts); },
       delete(pk, opts) { return del(name, pk, opts); },
-      upsert(row, opts) { return api.upsert(name, row, opts); },
-      watch(onChange) { return watch(name, onChange); },
+      upsert(rows, opts) { return api.upsert(name, rows, opts); },
+      watch(onChange) { return watch(name, onChange as any); },
       updateWhere(where, changes, opts) { return updateWhere(name, where, changes, opts); },
       deleteWhere(where, opts) { return deleteWhere(name, where, opts); }
     };
   }
   type Api = typeof api & { mutators: ClientMutatorsFromServer<TServerMutators> & { call: (name: string, args: unknown) => Promise<unknown> } } & Record<string, TableApi>;
-  // Build typed mutators proxy that infers keys/types from config.mutators when provided, and expose a dynamic call
   const mutators = new Proxy({ call: (name: string, args: any) => mutator(name as any, args) }, {
     get(target, prop: string) {
       if (prop === 'call') return (target as any).call;

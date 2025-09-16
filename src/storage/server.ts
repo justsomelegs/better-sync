@@ -1,8 +1,12 @@
 import type { DatabaseAdapter, PrimaryKey } from '../shared/types';
+import { canonicalPk, decodeCursor, encodeCursor } from './utils';
 import { monotonicFactory } from 'ulid';
 import initSqlJs from 'sql.js';
 import { promises as fs } from 'node:fs';
 import { resolve as resolvePath } from 'node:path';
+import { SyncError } from '../shared/errors';
+
+// URL builder intentionally removed to keep adapter DX explicit
 
 export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
   // In-memory SQLite via sql.js (sufficient for MVP & tests)
@@ -25,7 +29,11 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     const defs = cols.map((c) => c === 'id' ? `${c} TEXT PRIMARY KEY` : `${c} TEXT`).join(',');
     db.run(`CREATE TABLE IF NOT EXISTS ${table} (${defs})`);
   }
+  async function ensureMinimalTable(db: any, table: string) {
+    db.run(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, updatedAt INTEGER)`);
+  }
   return {
+    async ensureMeta() { const db = await ready; db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); },
     async begin() { const db = await ready; if (txDepth === 0) db.run('BEGIN'); txDepth++; },
     async commit() { const db = await ready; if (txDepth > 0) { txDepth--; if (txDepth === 0) { db.run('COMMIT'); if (filePath) { const data = db.export(); await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { }); await fs.writeFile(filePath, Buffer.from(data)); } } } },
     async rollback() { const db = await ready; if (txDepth > 0) { db.run('ROLLBACK'); txDepth = 0; } },
@@ -39,7 +47,7 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
         s.bind([String(row.id)]);
         const exists = s.step();
         s.free();
-        if (exists) { const e: any = new Error('duplicate'); e.code = 'CONFLICT'; e.details = { constraint: 'unique', column: 'id' }; throw e; }
+        if (exists) { throw new SyncError('CONFLICT', 'duplicate', { constraint: 'unique', column: 'id' }); }
       }
       const cols = Object.keys(row).filter((c) => c !== 'version');
       const placeholders = cols.map(() => '?').join(',');
@@ -55,13 +63,15 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const db = await ready;
       db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
       const key = canonicalPk(pk);
-      const g = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
+      let g: any;
+      try { g = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`); }
+      catch (err: any) { throw new SyncError('NOT_FOUND', 'not found'); }
       g.bind([key]); const cur = g.step() ? g.getAsObject() : null; g.free();
-      if (!cur) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!cur) { throw new SyncError('NOT_FOUND', 'not found'); }
       if (opts?.ifVersion != null) {
         const v = db.prepare(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`);
         v.bind([table, key]); const has = v.step(); const metaVer = has ? (v.getAsObject() as any).version : null; v.free();
-        if (metaVer != null && metaVer !== opts.ifVersion) { const e: any = new Error('Version mismatch'); e.code = 'CONFLICT'; e.details = { expectedVersion: opts.ifVersion, actualVersion: metaVer }; throw e; }
+        if (metaVer != null && metaVer !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: metaVer }); }
       }
       const next: any = { ...set };
       const cols = Object.keys(next).filter((c) => c !== 'version');
@@ -74,7 +84,7 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       }
       const out = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
       out.bind([key]); const row = out.step() ? out.getAsObject() : null; out.free();
-      if (!row) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!row) { throw new SyncError('NOT_FOUND', 'not found'); }
       // augment with version from meta
       const v2 = db.prepare(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`);
       v2.bind([table, key]); const has2 = v2.step(); const verOut = has2 ? (v2.getAsObject() as any).version : undefined; v2.free();
@@ -83,15 +93,18 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     async deleteByPk(table: string, pk: PrimaryKey) {
       const db = await ready;
       const key = canonicalPk(pk);
-      const s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`);
+      let s: any;
+      try { s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`); }
+      catch (err: any) { throw new SyncError('NOT_FOUND', 'not found'); }
       s.bind([key]); const existed = s.step(); s.free();
-      if (!existed) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!existed) { throw new SyncError('NOT_FOUND', 'not found'); }
       db.run(`DELETE FROM ${table} WHERE id = ?`, [key]);
       db.run(`DELETE FROM _sync_versions WHERE table_name = ? AND pk_canonical = ?`, [table, key]);
       return { ok: true } as const;
     },
     async selectByPk(table: string, pk: PrimaryKey, select?: string[]) {
       const db = await ready;
+      await ensureMinimalTable(db, table);
       const key = canonicalPk(pk);
       const s = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
       s.bind([key]); const row = s.step() ? s.getAsObject() : null; s.free();
@@ -105,15 +118,14 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     },
     async selectWindow(table: string, req: any) {
       const db = await ready;
+      await ensureMinimalTable(db, table);
       const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
       const keys = Object.keys(orderBy);
       let sql = `SELECT t.*, v.version AS __ver FROM ${table} t LEFT JOIN _sync_versions v ON v.table_name = ? AND v.pk_canonical = t.id`;
       const params: any[] = [table];
-      if (req.cursor) {
-        try {
-          const c = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as { last?: { id: string } };
-          if (c?.last?.id) { sql += ` WHERE t.id > ?`; params.push(c.last.id); }
-        } catch { }
+      {
+        const { lastId } = decodeCursor(req.cursor);
+        if (lastId) { sql += ` WHERE t.id > ?`; params.push(lastId); }
       }
       if (keys.length > 0) {
         const ord = keys.map(k => `t.${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
@@ -127,19 +139,18 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       const out: any[] = []; while (stmt.step()) { const r = stmt.getAsObject() as any; const { __ver, ...rest } = r; out.push(__ver != null ? { ...rest, version: __ver } : rest); } stmt.free();
       let nextCursor: string | null = null;
       if (out.length === limit) {
-        const last = out[out.length - 1];
-        nextCursor = Buffer.from(JSON.stringify({ last: { id: String((last as any).id) } }), 'utf8').toString('base64');
+        const last = out[out.length - 1] as any;
+        // Preserve richer cursor shape for compatibility
+        const lastKeys: Record<string, string | number> = {};
+        for (const k of keys) lastKeys[k] = last[k];
+        nextCursor = Buffer.from(JSON.stringify({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } }), 'utf8').toString('base64');
       }
       return { data: out, nextCursor };
     }
   };
 }
 
-function canonicalPk(pk: PrimaryKey): string {
-  if (typeof pk === 'string' || typeof pk === 'number') return String(pk);
-  const parts = Object.keys(pk).sort().map((k) => `${k}=${String(pk[k] as any)}`);
-  return parts.join('|');
-}
+// canonicalPk is provided by utils
 
 export function memoryAdapter(): DatabaseAdapter {
   const tables = new Map<string, Map<string, any>>();
@@ -157,16 +168,16 @@ export function memoryAdapter(): DatabaseAdapter {
         const e: any = new Error('duplicate'); e.code = 'CONFLICT'; e.details = { constraint: 'unique', column: 'id' }; throw e;
       }
       const now = Date.now();
-      const out = { ...row, id, updatedAt: (row as any).updatedAt ?? now, version: 1 };
+      const out = { ...row, id, updatedAt: (row as any).updatedAt ?? now, version: (row as any).version ?? 1 };
       t.set(key, out);
       return out;
     },
     async updateByPk(table: string, pk: PrimaryKey, set: Record<string, any>, opts?: { ifVersion?: number }) {
       const t = tables.get(table);
       const key = canonicalPk(pk);
-      if (!t || !t.has(key)) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!t || !t.has(key)) { throw new SyncError('NOT_FOUND', 'not found'); }
       const cur = t.get(key);
-      if (opts?.ifVersion && cur.version !== opts.ifVersion) { const e: any = new Error('Version mismatch'); e.code = 'CONFLICT'; e.details = { expectedVersion: opts.ifVersion, actualVersion: cur.version }; throw e; }
+      if (opts?.ifVersion && cur.version !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: cur.version }); }
       const now = Date.now();
       const out = { ...cur, ...set, updatedAt: now, version: (cur.version ?? 0) + 1 };
       t.set(key, out);
@@ -175,7 +186,7 @@ export function memoryAdapter(): DatabaseAdapter {
     async deleteByPk(table: string, pk: PrimaryKey) {
       const t = tables.get(table);
       const key = canonicalPk(pk);
-      if (!t || !t.has(key)) { const e: any = new Error('not found'); e.code = 'NOT_FOUND'; throw e; }
+      if (!t || !t.has(key)) { throw new SyncError('NOT_FOUND', 'not found'); }
       t.delete(key);
       return { ok: true } as const;
     },
@@ -209,25 +220,20 @@ export function memoryAdapter(): DatabaseAdapter {
       });
       const limit = typeof req.limit === 'number' ? req.limit : 100;
       let start = 0;
-      type CursorJson = { table: string; orderBy: Record<string, 'asc' | 'desc'>; last?: { keys: Record<string, string | number>; id: string } };
-      if (req.cursor) {
-        try {
-          const json = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')) as CursorJson;
-          const lastId = json?.last?.id;
-          if (lastId) {
-            const idx = rows.findIndex(r => String(r.id) === String(lastId));
-            if (idx >= 0) start = idx + 1;
-          }
-        } catch { }
+      {
+        const { lastId } = decodeCursor(req.cursor);
+        if (lastId) {
+          const idx = rows.findIndex(r => String(r.id) === String(lastId));
+          if (idx >= 0) start = idx + 1;
+        }
       }
       const page = rows.slice(start, start + limit);
       let nextCursor: string | null = null;
       if ((start + limit) < rows.length && page.length > 0) {
-        const last = page[page.length - 1];
+        const last = page[page.length - 1] as any;
         const lastKeys: Record<string, string | number> = {};
         for (const k of keys) lastKeys[k] = last[k];
-        const c: CursorJson = { table, orderBy, last: { keys: lastKeys, id: String(last.id) } };
-        nextCursor = Buffer.from(JSON.stringify(c), 'utf8').toString('base64');
+        nextCursor = Buffer.from(JSON.stringify({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } }), 'utf8').toString('base64');
       }
       return { data: page, nextCursor };
     }

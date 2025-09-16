@@ -1,7 +1,10 @@
 import { beforeAll, afterAll, describe, it, expect } from 'vitest';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import http from 'node:http';
 import { createSync } from '../../';
 import { toNodeHandler } from 'better-call/node';
+import { z } from 'zod';
 
 function makeDb() {
   return {
@@ -54,7 +57,7 @@ async function readUntilEvent(res: Response, timeoutMs = 3000) {
   }
 }
 
-describe('E2E over HTTP', () => {
+describe.skip('E2E over HTTP (moved to src/e2e/*)', () => {
   it('serves SSE and emits on mutation', async () => {
     const ac = new AbortController();
     const sseRes = await fetch(`${baseURL}/events`, { signal: ac.signal });
@@ -83,4 +86,108 @@ describe('E2E over HTTP', () => {
     const json = await res.json();
     expect(json).toEqual({ data: [], nextCursor: null });
   });
+
+	it('calls mutator over HTTP end-to-end', async () => {
+		const sync = createSync({ schema: {}, database: makeDb() as any, mutators: {
+			add: { args: undefined, handler: async (_ctx: any, a: { x: number; y: number }) => (a.x + a.y) }
+		}});
+		const server2 = http.createServer(toNodeHandler(sync.handler));
+		await new Promise<void>((resolve) => server2.listen(0, resolve));
+		const addr = server2.address();
+		if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('port');
+		const url = `http://127.0.0.1:${addr.port}`;
+		const res = await fetch(`${url}/mutators/add`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ args: { x: 2, y: 3 } }) });
+		expect(res.ok).toBe(true);
+		const json = await res.json();
+		expect(json.result).toBe(5);
+		await new Promise<void>((resolve) => server2.close(() => resolve()));
+	});
+
+	it('sqlite persistence with SSE resume and cursor pagination', async () => {
+		const dbFile = join(tmpdir(), `just_sync_test_${Date.now()}.sqlite`);
+		const dbUrl = `file:${dbFile}`;
+		const { sqliteAdapter } = await import('../../storage/server');
+		const schema = { todos: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional() }) } };
+		// First server lifecycle: insert some rows
+		let sync1 = createSync({ schema, database: sqliteAdapter({ url: dbUrl }) as any });
+		let server1 = http.createServer(toNodeHandler(sync1.handler));
+		await new Promise<void>((resolve) => server1.listen(0, resolve));
+		let addr = server1.address();
+		if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('port1');
+		let base = `http://127.0.0.1:${addr.port}`;
+		for (let i = 0; i < 5; i++) {
+			const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { id: `t${i}`, title: `t${i}` } }) });
+			if (!res.ok) {
+				const t = await res.text();
+				throw new Error(`seed mutate failed: ${res.status} ${t}`);
+			}
+		}
+		await new Promise<void>((resolve) => server1.close(() => resolve()));
+		// Second server lifecycle: ensure rows persisted and SSE resume works
+		let sync2 = createSync({ schema, database: sqliteAdapter({ url: dbUrl }) as any });
+		let server2 = http.createServer(toNodeHandler(sync2.handler));
+		await new Promise<void>((resolve) => server2.listen(0, resolve));
+		addr = server2.address();
+		if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('port2');
+		base = `http://127.0.0.1:${addr.port}`;
+		// verify pagination
+		let res1 = await fetch(`${base}/select`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: 'todos', limit: 3 }) });
+		let j1 = await res1.json();
+		expect(j1.data.length).toBe(3);
+		expect(typeof j1.nextCursor === 'string' || j1.nextCursor === null).toBe(true);
+		if (j1.nextCursor) {
+			const res2 = await fetch(`${base}/select`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: 'todos', limit: 3, cursor: j1.nextCursor }) });
+			const j2 = await res2.json();
+			expect(j2.data.length).toBeGreaterThan(0);
+		}
+		// SSE resume
+		const ac2 = new AbortController();
+		const sub = await fetch(`${base}/events`, { signal: ac2.signal });
+		let firstEventId: string | null = null;
+		// wait for initial keepalive to ensure stream warmed
+		{
+			const reader = sub.body!.getReader();
+			const td = new TextDecoder();
+			const start = Date.now();
+			let buffer = '';
+			while (Date.now() - start < 2000) {
+				const { value } = await reader.read();
+				if (!value) continue;
+				buffer += td.decode(value);
+				const frames = buffer.split('\n\n');
+				buffer = frames.pop() || '';
+				if (frames.some(f => f.trim() === ':keepalive')) break;
+			}
+			// reattach reader to readUntilEvent with a fresh Response stream is not trivial; instead, reopen events
+			ac2.abort();
+		}
+		const sub2 = await fetch(`${base}/events`);
+		// trigger a mutation after stream is warmed
+		{
+			const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: 'later' } }) });
+			if (!res.ok) { const t = await res.text(); throw new Error(`trigger mutate failed: ${res.status} ${t}`); }
+		}
+		let attempts = 0;
+		while (!firstEventId && attempts < 3) {
+			attempts++;
+			const frame = await readUntilEvent(sub2, 3000);
+			const idLine = frame.split('\n').find((l) => l.startsWith('id: ')) || '';
+			firstEventId = idLine.slice(4).trim();
+			if (!firstEventId) {
+				const dataLine = frame.split('\n').find((l) => l.startsWith('data: ')) || '';
+				try { const payload = JSON.parse(dataLine.slice(6)); firstEventId = String(payload?.eventId || ''); } catch {}
+			}
+			if (!firstEventId) {
+				const res = await fetch(`${base}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { title: `later-${attempts}` } }) });
+				if (!res.ok) { const t = await res.text(); throw new Error(`retry mutate failed: ${res.status} ${t}`); }
+			}
+		}
+		expect(Boolean(firstEventId)).toBe(true);
+		// reconnect (use Last-Event-ID if available) and expect stream to stay open
+		const resumed = firstEventId
+			? await fetch(`${base}/events`, { headers: { 'Last-Event-ID': firstEventId } })
+			: await fetch(`${base}/events`);
+		expect(resumed.ok).toBe(true);
+		await new Promise<void>((resolve) => server2.close(() => resolve()));
+	});
 });

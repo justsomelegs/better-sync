@@ -32,3 +32,15 @@ describe('upsert', () => {
     expect(res.status).toBe(409);
   });
 });
+
+describe('upsert arrays', () => {
+  it('returns rows when upserting many', async () => {
+    const { fetch } = createSync({ schema: {}, database: makeDb() as any });
+    const ids = ['01J9Y0C8WEN8G2YCP0QWQFQ8R9','01J9Y0C8WEN8G2YCP0QWQFQ8RA'];
+    const res = await fetch(new Request('http://test/mutate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'upsert', table: 'todos', rows: [ { id: ids[0], title: 'a' }, { id: ids[1], title: 'b' } ] }) }));
+    expect(res.ok).toBe(true);
+    const j = await res.json();
+    expect(Array.isArray(j.rows)).toBe(true);
+    expect(j.rows.length).toBe(2);
+  });
+});

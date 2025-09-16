@@ -56,4 +56,31 @@ describe('client datastore', () => {
     const after = await client.local.readByPk('todos', 'x');
     expect(after?.title).toBe('x');
   });
+
+	it('select with where filters client-side across pages', async () => {
+		const rows: any[] = [];
+		const db = {
+			async begin() {}, async commit() {}, async rollback() {},
+			async insert(_t: string, row: any) { rows.push(row); return { ...row }; },
+			async updateByPk() { return {}; }, async deleteByPk() { return { ok: true } }, async selectByPk() { return null; },
+			async selectWindow(_t: string, req: any) {
+				const ordered = rows.slice().sort((a,b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+				const limit = req.limit ?? 2; let start = 0;
+				if (req.cursor) {
+					const id = JSON.parse(Buffer.from(String(req.cursor), 'base64').toString('utf8')).last?.id;
+					if (id) { const idx = ordered.findIndex(r => String(r.id) === String(id)); if (idx >= 0) start = idx + 1; }
+				}
+				const page = ordered.slice(start, start + limit);
+				const nextCursor = (start + limit) < ordered.length ? Buffer.from(JSON.stringify({ last: { id: String(page[page.length-1]?.id ?? '') } }), 'utf8').toString('base64') : null;
+				return { data: page, nextCursor };
+			}
+		} as any;
+		const sync = createSync({ schema: {}, database: db });
+		for (let i = 0; i < 5; i++) {
+			await sync.fetch(new Request('http://test/mutate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'insert', table: 'todos', rows: { id: `t${i}`, title: i % 2 === 0 ? 'keep' : 'skip' } }) }));
+		}
+		const client = createClient({ baseURL: 'http://test', fetch: (input: any, init?: any) => sync.fetch(typeof input === 'string' ? new Request(input, init) : input) });
+		const res = await client.todos.select({ where: (r: any) => r.title === 'keep', limit: 3 });
+		expect(res.data.length).toBe(3);
+	});
 });

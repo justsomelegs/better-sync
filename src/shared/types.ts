@@ -13,7 +13,11 @@ export interface IdempotencyStore<V = unknown> {
   has(key: string): Promise<boolean> | boolean;
   get(key: string): Promise<V | undefined> | V | undefined;
   set(key: string, value: V): Promise<void> | void;
+  acquire?(key: string, ttlMs: number): Promise<{ ok: true } | { ok: false }> | { ok: true } | { ok: false };
+  release?(key: string): Promise<void> | void;
 }
+
+export type AdapterError = { code: 'CONFLICT' | 'NOT_FOUND' | 'BAD_REQUEST' | 'INTERNAL'; message?: string; details?: unknown };
 
 export interface DatabaseAdapter {
   begin(): Promise<void>;
@@ -24,7 +28,10 @@ export interface DatabaseAdapter {
   deleteByPk(table: string, pk: PrimaryKey): Promise<{ ok: true }>;
   selectByPk(table: string, pk: PrimaryKey, select?: string[]): Promise<Record<string, unknown> | null>;
   selectWindow(table: string, req: SelectWindow & { where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
+  ensureMeta?(): Promise<void>;
 }
+
+export type AdapterFactory = (url: string, opts?: Record<string, unknown>) => Promise<DatabaseAdapter> | DatabaseAdapter;
 
 // Mutator typing helpers (for server and client type-safety)
 export type MutatorSpec<Args, Result> = { args?: unknown } & Record<string, unknown>;

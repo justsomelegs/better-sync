@@ -21,6 +21,22 @@
     "./next-js": {
       "types": "./dist/next-js.d.ts",
       "import": "./dist/next-js.mjs"
+    },
+    "./adapters/drizzle": {
+      "types": "./dist/adapters/drizzle.d.ts",
+      "import": "./dist/adapters/drizzle.mjs"
+    },
+    "./adapters/prisma": {
+      "types": "./dist/adapters/prisma.d.ts",
+      "import": "./dist/adapters/prisma.mjs"
+    },
+    "./adapters/libsql": {
+      "types": "./dist/adapters/libsql.d.ts",
+      "import": "./dist/adapters/libsql.mjs"
+    },
+    "./adapters/postgres": {
+      "types": "./dist/adapters/postgres.d.ts",
+      "import": "./dist/adapters/postgres.mjs"
     }
   },
   "bin": {
@@ -38,7 +54,8 @@
     "coverage": "vitest run --coverage",
     "turbo": "turbo",
     "lint": "biome lint .",
-    "format": "biome format . --write"
+    "format": "biome format . --write",
+    "bench": "node benchmarks/adapter-sqlite-insert.mjs && node benchmarks/server-mutate-insert.mjs && node benchmarks/server-select-window.mjs && node benchmarks/notify-latency.mjs"
   },
   "engines": {
     "node": ">=18"
@@ -52,6 +69,16 @@
   },
   "homepage": "https://github.com/justsomelegs/better-sync#readme",
   "keywords": [],
+  "peerDependencies": {
+    "drizzle-orm": "*",
+    "@libsql/client": ">=0.15.0",
+    "pg": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "drizzle-orm": { "optional": true },
+    "@libsql/client": { "optional": true },
+    "pg": { "optional": true }
+  },
   "devDependencies": {
     "@biomejs/biome": "^2.2.4",
     "@tsconfig/node18": "^18.2.4",
@@ -61,12 +88,15 @@
     "turbo": "^2.5.6",
     "typescript": "^5.9.2",
     "unbuild": "^3.6.1",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "tinybench": "^2.6.0"
   },
   "dependencies": {
     "better-call": "^1.0.18",
     "sql.js": "^1.10.3",
     "ulid": "^3.0.1",
-    "zod": "^4.1.8"
+    "zod": "^4.1.8",
+    "@libsql/client": "^0.10.0",
+    "pg": "^8.11.5"
   }
 }
