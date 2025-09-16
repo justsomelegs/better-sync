@@ -78,9 +78,9 @@ context: async (req) => {
 }
 ```
 
-#### Better Auth (Next.js App Router)
+#### Better Auth (Recommended: `auth.api.getSession`)
 
-The Better Auth SDK typically exposes an initialized `auth` instance with helpers to read the current session from a `Request` or cookies. Depending on your setup, one of the following patterns will apply. Replace `~/server/auth` with where you initialize your Better Auth instance.
+On newer Better Auth versions, the recommended server API retrieves the session from request headers via `auth.api.getSession({ headers })`.
 
 ```ts
 // server/sync.ts
@@ -93,20 +93,9 @@ export const sync = createSync({
   schema,
   database: sqliteAdapter({ url: 'file:./app.db' }),
   context: async (req) => {
-    // Variant A: Better Auth can read from the Request directly
-    try {
-      const session = await auth.getSession?.(req);
-      if (session) return { userId: session.user.id, roles: session.user.roles ?? [] };
-    } catch {}
-
-    // Variant B: derive from cookies (if your helper expects raw cookies)
-    const cookie = req.headers.get('cookie') || '';
-    try {
-      const session = await auth.getSessionFromCookie?.(cookie);
-      if (session) return { userId: session.user.id, roles: session.user.roles ?? [] };
-    } catch {}
-
-    return { userId: null, roles: [] };
+    const session = await auth.api.getSession({ headers: req.headers });
+    const user = session?.user;
+    return { userId: user?.id ?? null, roles: user?.roles ?? [] };
   },
   mutators: {
     createNote: {
@@ -132,8 +121,8 @@ export const { GET, POST } = toNextJsHandler(sync.handler);
 ```
 
 Tips:
-- Pick the Better Auth helper that matches your setup (Request-based or cookies-based) and remove the other variant.
-- If roles/permissions are part of the session, include them in `ctx` to enforce mutator-level authorization.
+- Forward exactly `req.headers` into `auth.api.getSession`.
+- If your project exposes a different helper (older versions), adapt the `context` function accordingly.
 
 ### Enforcing authorization in mutators
 
