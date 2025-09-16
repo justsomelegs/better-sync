@@ -54,12 +54,20 @@ export function drizzleAdapter(config: { db: any; idField?: string | Record<stri
 			}
 			return { ...row } as any;
 		},
-		async updateByPk(table, pk, set) {
+		async updateByPk(table, pk, set, opts) {
 			const key = canonicalPk(pk);
 			const cols = Object.keys(set).filter((c) => c !== 'version');
 			const t = resolveFn(table);
 			if (!t) { throw new SyncError('BAD_REQUEST', `Unknown table: ${table}`); }
 			const { eq } = await ops();
+			if (opts?.ifVersion != null) {
+				try {
+					const v = await execRaw('SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1', [table, key]);
+					const rows = Array.isArray(v) ? v : (v && typeof v === 'object' && Array.isArray((v as any).rows) ? (v as any).rows : []);
+					const metaVer = rows.length ? Number((rows[0] as any).version) : null;
+					if (metaVer != null && metaVer !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: metaVer }); }
+				} catch {}
+			}
 			if (cols.length > 0) {
 				const values: Record<string, unknown> = {};
 				for (const c of cols) values[c] = (set as any)[c];
