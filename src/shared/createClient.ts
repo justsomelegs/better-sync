@@ -304,8 +304,24 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
             for (const t of tables) {
               const tableName = t?.name as string;
               if (!tableName || !watchers.has(tableName)) continue;
-              // immediate notify
-              notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              // Try apply diffs immediately when provided
+              const diffs = (t && t.diffs) || null;
+              if (diffs && typeof diffs === 'object') {
+                const tableCache = getTable(tableName);
+                for (const [rid, diff] of Object.entries(diffs as Record<string, { set?: any; unset?: string[] }>)) {
+                  const key = String(rid);
+                  const prev = tableCache.get(key) || {};
+                  const next = { ...prev, ...(diff.set || {}) };
+                  if (Array.isArray(diff.unset)) {
+                    for (const k of diff.unset) delete (next as any)[k];
+                  }
+                  tableCache.set(key, next);
+                }
+                notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              } else {
+                // no diffs: notify and debounce snapshot
+                notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              }
               // debounce snapshot per table: run per watcher with its args
               if (tableDebounce.get(tableName)) continue;
               const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? defaults.debounceMs;
