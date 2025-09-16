@@ -22,35 +22,34 @@ const baseURL = `http://127.0.0.1:${addr.port}`;
 const clientA = createClient({ baseURL, realtime: 'sse' });
 const clientB = createClient({ baseURL, realtime: 'sse' });
 
-// prime connections
+// Prime server and create table with an initial insert
+await clientA.insert('bench_notes', { title: 'seed' }).catch(() => {});
 await clientA.select({ table: 'bench_notes', limit: 1 });
 await clientB.select({ table: 'bench_notes', limit: 1 });
-await new Promise((r) => setTimeout(r, 200));
+await new Promise((r) => setTimeout(r, 300));
 
 let resolveEvt;
-let pending;
 const latencies = [];
 
-function armWatcher() {
-	return clientB.watch('bench_notes', (evt) => {
-		if (evt && (evt.pks?.length || evt.changes || evt.change)) {
-			if (resolveEvt) resolveEvt();
-		}
-	});
-}
+// Single watcher, resolves per-iteration promise
+const stop = clientB.watch('bench_notes', (evt) => {
+	if (evt && (evt.pks?.length || evt.changes || evt.change)) {
+		if (resolveEvt) resolveEvt();
+	}
+});
 
 console.log(`Benchmarking notify latency over ${ITER} iterations...`);
 for (let i = 0; i < ITER; i++) {
-	const stop = armWatcher();
-	await new Promise((r) => setTimeout(r, 10));
+	await new Promise((r) => setTimeout(r, 5));
 	const t0 = process.hrtime.bigint();
+	const p = new Promise((res) => (resolveEvt = res));
 	await clientA.insert('bench_notes', { title: `n${i}` });
-	pending = new Promise((res) => (resolveEvt = res));
-	await pending;
+	await p;
 	const t1 = process.hrtime.bigint();
-	stop();
 	latencies.push(Number(t1 - t0) / 1e6);
 }
+
+stop();
 
 latencies.sort((a, b) => a - b);
 const avg = latencies.reduce((a, b) => a + b, 0) / latencies.length;
