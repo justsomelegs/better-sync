@@ -256,6 +256,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   const seenEventIds = new Set<string>();
   const maxSeen = 5000;
   const tableDebounce = new Map<string, any>();
+  let retryAttempt = 0;
 
   async function startSseIfNeeded() {
     if (sseRunning || realtimeMode !== 'sse') return;
@@ -267,6 +268,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       if (lastEventId) headers['Last-Event-ID'] = lastEventId;
       const res = await fetchImpl(`${baseURL}/events`, { signal: sseAC.signal, headers });
       if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
+      retryAttempt = 0;
       const reader = res.body.getReader();
       const td = new TextDecoder();
       let buffer = '';
@@ -353,7 +355,14 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     } finally {
       sseRunning = false;
       if (watchers.size > 0 && realtimeMode === 'sse') {
-        setTimeout(() => { if (!sseRunning) startSseIfNeeded(); }, 500);
+        retryAttempt = Math.min(retryAttempt + 1, 1000);
+        if (hooks.onRetry) { try { hooks.onRetry({ attempt: retryAttempt, reason: undefined }); } catch {} }
+        const base = 500;
+        const max = 5000;
+        const exp = Math.min(base * Math.pow(2, retryAttempt - 1), max);
+        const jitter = Math.floor(Math.random() * 250);
+        const delay = Math.min(exp + jitter, max);
+        setTimeout(() => { if (!sseRunning) startSseIfNeeded(); }, delay);
       }
     }
   }
