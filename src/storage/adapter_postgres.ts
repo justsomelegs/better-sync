@@ -6,7 +6,9 @@ import { SyncError } from '../shared/errors';
 // canonicalPk provided by utils
 
 export function postgresAdapter(config: { url: string }): DatabaseAdapter {
+	let txClient: any | null = null;
 	async function getClient() {
+		if (txClient) return txClient;
 		try {
 			const mod: any = await import('pg');
 			const { Client } = mod as any;
@@ -19,9 +21,30 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 	}
 	async function run(sql: string, params?: any[]) {
 		const c = await getClient();
-		try { const res = await c.query(sql, params || []); await c.end(); return res; } catch (e) { await c.end(); throw e; }
+		const inTx = !!txClient;
+		try { const res = await c.query(sql, params || []); if (!inTx) await c.end(); return res; } catch (e) { if (!inTx) await c.end(); throw e; }
 	}
 	return createAdapter({
+		async begin() {
+			if (txClient) return;
+			const mod: any = await import('pg');
+			const { Client } = mod as any;
+			txClient = new Client({ connectionString: config.url });
+			await txClient.connect();
+			await txClient.query('BEGIN');
+		},
+		async commit() {
+			if (!txClient) return;
+			await txClient.query('COMMIT');
+			await txClient.end();
+			txClient = null;
+		},
+		async rollback() {
+			if (!txClient) return;
+			try { await txClient.query('ROLLBACK'); } catch {}
+			await txClient.end();
+			txClient = null;
+		},
 		async ensureMeta() {
 			await run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
 		},
@@ -38,6 +61,11 @@ export function postgresAdapter(config: { url: string }): DatabaseAdapter {
 		},
 		async updateByPk(table, pk, set, opts) {
 			const key = canonicalPk(pk);
+			if (opts?.ifVersion != null) {
+				const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = $1 AND pk_canonical = $2 LIMIT 1`, [table, key]);
+				const metaVer = vres.rows?.length ? Number((vres.rows[0] as any).version) : null;
+				if (metaVer != null && metaVer !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: metaVer }); }
+			}
 			const cols = Object.keys(set).filter((c) => c !== 'version');
 			if (cols.length > 0) {
 				const assigns = cols.map((c, i) => `${c} = $${i + 1}`).join(',');

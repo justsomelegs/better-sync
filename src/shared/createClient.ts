@@ -239,6 +239,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   let sseRunning = false;
   let lastEventId: string | null = null;
   const seenEventIds = new Set<string>();
+  const maxSeen = 5000;
   const tableDebounce = new Map<string, any>();
 
   async function startSseIfNeeded() {
@@ -269,6 +270,15 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
             lastEventId = eid;
             if (seenEventIds.has(eid)) continue;
             seenEventIds.add(eid);
+            if (seenEventIds.size > maxSeen) {
+              // prune oldest half by recreating set (iteration order is insertion order for Set)
+              const keep = Math.floor(maxSeen / 2);
+              const next = new Set<string>();
+              let i = 0;
+              for (const v of seenEventIds) { if (i++ >= keep) break; next.add(v); }
+              seenEventIds.clear();
+              for (const v of next) seenEventIds.add(v);
+            }
           }
           if (f.includes('event: mutation')) {
             const dataLine = f.split('\n').find((l) => l.startsWith('data: '));

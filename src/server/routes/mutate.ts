@@ -19,6 +19,10 @@ export function buildPostMutate(deps: {
 	}, async (ctx) => {
 		const body = ctx.body as any;
 		const opId = body.clientOpId ?? ulid();
+		if (body.op === 'insert' || body.op === 'upsert') {
+			const rows = Array.isArray(body.rows) ? body.rows : (body.row ? [body.row] : (body.rows ? [body.rows] : []));
+			if (rows.length > 100) { throw new SyncError('BAD_REQUEST', 'Max batch size exceeded', { max: 100 }); }
+		}
 		if (await Promise.resolve(idem.has(opId))) {
 			const prev = await Promise.resolve(idem.get(opId));
 			return { ...(prev as object), duplicated: true } as any;

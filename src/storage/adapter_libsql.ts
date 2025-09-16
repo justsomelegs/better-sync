@@ -4,6 +4,7 @@ import { canonicalPk, decodeWindowCursor, encodeWindowCursor, defaultOrderBy, ma
 import { SyncError } from '../shared/errors';
 
 export function libsqlAdapter(config: { url: string; authToken?: string }): DatabaseAdapter {
+	let txClient: any | null = null;
 	async function getClient() {
 		try {
 			const mod: any = await import('@libsql/client');
@@ -14,10 +15,26 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 		}
 	}
 	async function run(sql: string, params?: any[]) {
-		const c = await getClient();
+		const c = txClient || await getClient();
 		return c.execute({ sql, args: params || [] });
 	}
 	return createAdapter({
+		async begin() {
+			if (txClient) return;
+			const mod: any = await import('@libsql/client');
+			txClient = mod.createClient({ url: config.url, authToken: (config as any).authToken });
+			await txClient.execute('BEGIN');
+		},
+		async commit() {
+			if (!txClient) return;
+			await txClient.execute('COMMIT');
+			txClient = null;
+		},
+		async rollback() {
+			if (!txClient) return;
+			try { await txClient.execute('ROLLBACK'); } catch {}
+			txClient = null;
+		},
 		async ensureMeta() {
 			await run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
 		},
@@ -38,6 +55,12 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 		},
 		async updateByPk(table, pk, set, opts) {
 			const key = canonicalPk(pk);
+			if (opts?.ifVersion != null) {
+				const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`, [table, key]);
+				const row0 = vres.rows?.[0];
+				const metaVer = row0 ? Number(rowFromLibsql(row0)?.version) : null;
+				if (metaVer != null && metaVer !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: metaVer }); }
+			}
 			const cols = Object.keys(set).filter((c) => c !== 'version');
 			if (cols.length > 0) {
 				const assigns = cols.map((c) => `${c} = ?`).join(',');
