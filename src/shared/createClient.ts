@@ -259,6 +259,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   const seenEventIds = new Set<string>();
   const maxSeen = 5000;
   const tableDebounce = new Map<string, any>();
+  const coalescedSnapshots = new Map<string, Promise<{ data: any[]; nextCursor: string | null }>>();
   let retryAttempt = 0;
 
   async function startSseIfNeeded() {
@@ -355,18 +356,33 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
               tableDebounce.delete(tableName);
               const currentSubs = watchers.get(tableName);
               if (!currentSubs || currentSubs.size === 0) return;
+              let shared: Promise<{ data: any[]; nextCursor: string | null }> | null = null;
               for (const entry of currentSubs) {
                 try {
-                  const res = await select({ table: tableName, where: entry.args.where, select: entry.args.select, orderBy: entry.args.orderBy, limit: entry.args.limit });
-                  entry.lastData = res.data;
-                  entry.status = 'live';
-                  entry.error = undefined;
-                  entry.fn({ table: tableName, data: res.data });
+                  const key = `${tableName}::${entry.args.where ? 'w' : ''}::${(entry.args.limit ?? '')}::${entry.args.orderBy ? JSON.stringify(entry.args.orderBy) : ''}::${entry.args.select ? entry.args.select.join(',') : ''}`;
+                  if (!entry.args.where) {
+                    shared = shared || coalescedSnapshots.get(key) || select({ table: tableName, limit: entry.args.limit, orderBy: entry.args.orderBy });
+                    coalescedSnapshots.set(key, shared);
+                    const res = await shared;
+                    entry.lastData = res.data;
+                    entry.status = 'live';
+                    entry.error = undefined;
+                    entry.fn({ table: tableName, data: res.data });
+                  } else {
+                    const res = await select({ table: tableName, where: entry.args.where, select: entry.args.select, orderBy: entry.args.orderBy, limit: entry.args.limit });
+                    entry.lastData = res.data;
+                    entry.status = 'live';
+                    entry.error = undefined;
+                    entry.fn({ table: tableName, data: res.data });
+                  }
                 } catch (e: any) {
                   entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
                   entry.status = 'retrying';
                   entry.fn({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
                 }
+              }
+              if (shared) {
+                setTimeout(() => { coalescedSnapshots.clear(); }, 0);
               }
             }, delay));
           }

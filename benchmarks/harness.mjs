@@ -4,6 +4,7 @@
  * Scenarios:
  * - insert_seq: sequential inserts via HTTP client
  * - insert_concurrent: concurrent inserts via HTTP client
+ * - insert_batch: batched inserts via HTTP client (array payloads)
  * - update_conflict: concurrent updates with ifVersion to trigger conflicts
  * - select_window: paginated reads until exhaustion
  * - notify_latency: watcher latency distribution
@@ -30,6 +31,7 @@ import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const concurrency = Number(process.env.BENCH_CONCURRENCY || 32);
+const batchSize = Number(process.env.BENCH_BATCH || 50);
 const iterations = Number(process.env.BENCH_ITER || 1);
 const scenariosEnv = (process.env.BENCH_SCENARIOS || 'insert_seq,insert_concurrent,select_window,update_conflict,notify_latency,notify_stress').split(',').map(s => s.trim()).filter(Boolean);
 const outDir = resolve(process.env.BENCH_OUTPUT_DIR || 'benchmarks/results');
@@ -110,6 +112,32 @@ async function scenarioInsertConcurrent(client) {
   const cpu = process.cpuUsage(startCpu);
   const rssEnd = process.memoryUsage().rss;
   return { ops: rows, elapsedMs, latencies: summarizeLatencies(lat), throughput: rows / (elapsedMs / 1000), cpu, memory: { rssStart, rssEnd, delta: rssEnd - rssStart } };
+}
+
+async function scenarioInsertBatch(client) {
+  const total = rows;
+  const numBatches = Math.ceil(total / batchSize);
+  const batches = Array.from({ length: numBatches }, (_, bi) => {
+    const start = bi * batchSize;
+    const end = Math.min(start + batchSize, total);
+    const payload = [];
+    for (let i = start; i < end; i++) payload.push({ id: `b-${i}`, k: `k${i}`, v: i });
+    return payload;
+  });
+  const lat = [];
+  const tasks = batches.map((payload) => async () => {
+    const t0 = Date.now();
+    await client.insert('bench', payload);
+    lat.push(Date.now() - t0);
+  });
+  const startCpu = process.cpuUsage();
+  const rssStart = process.memoryUsage().rss;
+  const started = Date.now();
+  await withConcurrency(concurrency, tasks);
+  const elapsedMs = Date.now() - started;
+  const cpu = process.cpuUsage(startCpu);
+  const rssEnd = process.memoryUsage().rss;
+  return { ops: total, batches: numBatches, batchSize, elapsedMs, latencies: summarizeLatencies(lat), throughput: total / (elapsedMs / 1000), cpu, memory: { rssStart, rssEnd, delta: rssEnd - rssStart } };
 }
 
 async function scenarioSelectWindow(client) {
@@ -243,6 +271,8 @@ async function run() {
       bench.add('insert_seq', async () => { results.scenarios['insert_seq'] = await scenarioInsertSeq(client); });
     } else if (name === 'insert_concurrent') {
       bench.add('insert_concurrent', async () => { results.scenarios['insert_concurrent'] = await scenarioInsertConcurrent(client); });
+    } else if (name === 'insert_batch') {
+      bench.add('insert_batch', async () => { results.scenarios['insert_batch'] = await scenarioInsertBatch(client); });
     } else if (name === 'select_window') {
       bench.add('select_window', async () => { results.scenarios['select_window'] = await scenarioSelectWindow(client); });
     } else if (name === 'update_conflict') {

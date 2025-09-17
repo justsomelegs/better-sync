@@ -8,7 +8,7 @@ import { SyncError } from '../shared/errors';
 
 // URL builder intentionally removed to keep adapter DX explicit
 
-export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
+export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flushMs?: number }): DatabaseAdapter {
   // In-memory SQLite via sql.js (sufficient for MVP & tests)
   const filePath = _config.url?.startsWith('file:') ? resolvePath(_config.url.slice('file:'.length)) : null;
   const ready = initSqlJs({ locateFile: (f: string) => `node_modules/sql.js/dist/${f}` }).then(async (SQL) => {
@@ -27,6 +27,23 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
   const ensuredTables = new Set<string>();
   const ensuredMinimal = new Set<string>();
   let dirtySinceExport = false;
+  const ensureIndex = new Set<string>();
+  const asyncFlush = !!_config.asyncFlush;
+  const flushMs = typeof _config.flushMs === 'number' ? Math.max(1, _config.flushMs) : 5;
+  let flushTimer: NodeJS.Timeout | null = null;
+  async function scheduleFlush(db: any) {
+    if (!filePath) return;
+    if (!dirtySinceExport) return;
+    if (flushTimer) return;
+    flushTimer = setTimeout(async () => {
+      flushTimer = null;
+      if (!dirtySinceExport) return;
+      const data = db.export();
+      await fs.mkdir(resolvePath(filePath!, '..'), { recursive: true }).catch(() => { });
+      await fs.writeFile(filePath!, Buffer.from(data));
+      dirtySinceExport = false;
+    }, flushMs);
+  }
   async function ensureTable(db: any, table: string, row: Record<string, unknown>) {
     if (ensuredTables.has(table)) return;
     const cols = Object.keys(row).filter((c) => c !== 'version');
@@ -34,16 +51,23 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     const defs = cols.map((c) => c === 'id' ? `${c} TEXT PRIMARY KEY` : `${c} TEXT`).join(',');
     db.run(`CREATE TABLE IF NOT EXISTS ${table} (${defs})`);
     ensuredTables.add(table);
+    // index for common pagination pattern
+    if (cols.includes('updatedAt')) {
+      const idxKey = `${table}::updatedAt_id`;
+      if (!ensureIndex.has(idxKey)) { try { db.run(`CREATE INDEX IF NOT EXISTS idx_${table}_updatedAt_id ON ${table}(updatedAt, id)`); } catch {} ensureIndex.add(idxKey); }
+    }
   }
   async function ensureMinimalTable(db: any, table: string) {
     if (ensuredMinimal.has(table)) return;
     db.run(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, updatedAt INTEGER)`);
     ensuredMinimal.add(table);
+    const idxKey = `${table}::updatedAt_id`;
+    if (!ensureIndex.has(idxKey)) { try { db.run(`CREATE INDEX IF NOT EXISTS idx_${table}_updatedAt_id ON ${table}(updatedAt, id)`); } catch {} ensureIndex.add(idxKey); }
   }
   return {
     async ensureMeta() { const db = await ready; if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; } },
     async begin() { const db = await ready; if (txDepth === 0) db.run('BEGIN'); txDepth++; },
-    async commit() { const db = await ready; if (txDepth > 0) { txDepth--; if (txDepth === 0) { db.run('COMMIT'); if (filePath && dirtySinceExport) { const data = db.export(); await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { }); await fs.writeFile(filePath, Buffer.from(data)); dirtySinceExport = false; } } } },
+    async commit() { const db = await ready; if (txDepth > 0) { txDepth--; if (txDepth === 0) { db.run('COMMIT'); if (filePath && dirtySinceExport) { if (asyncFlush) { await scheduleFlush(db); } else { const data = db.export(); await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { }); await fs.writeFile(filePath, Buffer.from(data)); dirtySinceExport = false; } } } } },
     async rollback() { const db = await ready; if (txDepth > 0) { db.run('ROLLBACK'); txDepth = 0; } },
     async insert(table: string, row: Record<string, any>) {
       const db = await ready;

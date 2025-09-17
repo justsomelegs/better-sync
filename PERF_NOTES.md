@@ -109,3 +109,21 @@ Notes:
 - Stress shows server can push ~500 events/s locally with sql.js + SSE; CPU mainly in userland JSON/stringify and adapter.
 - Next directions: optional lightweight diff payloads (omit full JSON stringify for unchanged fields), and batch inserts in harness to test scale-up.
 
+## 2025-09-17 — Iteration 5 (Batch inserts, coalesced snapshots, sqlite indexes/flush)
+
+- Changes:
+  - Harness: added `insert_batch` scenario (array inserts), configurable `BENCH_BATCH` size
+  - Client: coalesce debounced snapshots per table/request to a shared select
+  - sqlite: automatic `(updatedAt, id)` index; optional `asyncFlush` (off by default) to decouple file export
+
+Results (focused scenarios):
+
+- insert_batch (size=50): ~11,428 ops/s (2k rows in 175 ms)
+- insert_concurrent (same settings): ~468 ops/s in this focused run due to prior load; batch shows 24x higher throughput
+- notify_stress: ~454 events/s (slightly lower due to concurrent batch test conditions)
+
+Notes:
+- Batching offers a large win within the existing API — users can pass arrays to `insert`.
+- Snapshot coalescing reduces duplicate `/select` calls when multiple watchers exist; benefits grow with watcher count.
+- Indexing `updatedAt,id` future-proofs windowed reads; `asyncFlush` can help steady-state write latency when file-backed persistence is needed.
+
