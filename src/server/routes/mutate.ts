@@ -35,6 +35,43 @@ export function buildPostMutate(deps: {
 		try {
 			let result: unknown;
 			const txId = ulid();
+			if (body.op === 'batch') {
+				const results: any[] = [];
+				for (const sub of (body.ops as any[])) {
+					(ctx as any).body = sub;
+					// recursively handle via the same endpoint logic by mutating body
+					// Note: for perf, we inline the common cases instead
+					if (sub.op === 'insert') {
+						const rows = Array.isArray(sub.rows) ? sub.rows : [sub.rows];
+						const out: Record<string, unknown>[] = [];
+						for (const r of rows) {
+							const tableSchema = getTableSchema(sub.table);
+							if (tableSchema) {
+								const parsed = (tableSchema.partial() as unknown as z.ZodTypeAny).safeParse(r);
+								if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
+							}
+							const providedId = (r as any).id;
+							const stampedId = chooseStampedId(ulid, providedId);
+							const stamped = { ...r, id: stampedId, [getUpdatedAtField(sub.table)]: now, version: 1 } as Record<string, unknown>;
+							out.push(await db.insert(sub.table, stamped));
+						}
+						results.push({ rows: out });
+					} else if (sub.op === 'update') {
+						const tableSchema = getTableSchema(sub.table);
+						if (tableSchema) {
+							const parsed = (tableSchema.partial() as unknown as z.ZodTypeAny).safeParse(sub.set);
+							if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
+						}
+						const existing = await db.selectByPk(sub.table, sub.pk as PrimaryKey);
+						const nextVersion = (existing as any)?.version ? Number((existing as any).version) + 1 : 1;
+						const row = await db.updateByPk(sub.table, sub.pk as PrimaryKey, { ...sub.set, [getUpdatedAtField(sub.table)]: now, version: nextVersion }, { ifVersion: sub.ifVersion });
+						results.push({ row });
+					} else if (sub.op === 'delete') {
+						results.push(await db.deleteByPk(sub.table, sub.pk as PrimaryKey));
+					}
+				}
+				result = { results };
+			}
 			if (body.op === 'insert') {
 				if (Array.isArray(body.rows)) {
 					const out: Record<string, unknown>[] = [];

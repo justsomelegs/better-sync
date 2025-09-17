@@ -7,6 +7,7 @@
  * - insert_batch: batched inserts via HTTP client (array payloads)
  * - update_conflict: concurrent updates with ifVersion to trigger conflicts
  * - cas_update: single-round-trip update with ifVersion, measures CAS throughput
+ * - mixed_batch: mixed operations in one /mutate batch
  * - select_window: paginated reads until exhaustion
  * - notify_latency: watcher latency distribution
  * - notify_stress: high-volume mutation notifications throughput
@@ -281,6 +282,19 @@ async function scenarioCasUpdate(client) {
   return { ops: rows, elapsedMs, throughput: rows / (elapsedMs / 1000), outcomes: { ok, conflict }, latencies: summarizeLatencies(lat) };
 }
 
+async function scenarioMixedBatch(client) {
+  const ops = [];
+  for (let i = 0; i < rows; i++) {
+    ops.push({ op: 'insert', table: 'bench', rows: { id: `mb-${i}`, k: `k${i}`, v: i } });
+    if (i % 10 === 0) ops.push({ op: 'update', table: 'bench', pk: `mb-${i}`, set: { v: i + 1 } });
+  }
+  const started = Date.now();
+  const res = await fetch(`${client.config.baseURL}/mutate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ op: 'batch', ops }) });
+  await res.json();
+  const elapsedMs = Date.now() - started;
+  return { ops: ops.length, elapsedMs, throughput: ops.length / (elapsedMs / 1000) };
+}
+
 async function scenarioNotifyLatency(baseURL) {
   const clientA = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
   const clientB = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
@@ -365,6 +379,8 @@ async function run() {
       bench.add('notify_stress', async () => { results.scenarios['notify_stress'] = await scenarioNotifyStress(baseURL); });
     } else if (name === 'cas_update') {
       bench.add('cas_update', async () => { results.scenarios['cas_update'] = await scenarioCasUpdate(client); });
+    } else if (name === 'mixed_batch') {
+      bench.add('mixed_batch', async () => { results.scenarios['mixed_batch'] = await scenarioMixedBatch(client); });
     } else if (name === 'libsql_insert' && process.env.LIBSQL_URL) {
       bench.add('libsql_insert', async () => {
         const adapter = libsqlAdapter({ url: process.env.LIBSQL_URL });

@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "rows": 2000,
+    "concurrency": 32,
+    "iterations": 1,
+    "node": "v22.16.0",
+    "date": "2025-09-17T18:29:28.810Z"
+  },
+  "scenarios": {
+    "mixed_batch": {
+      "ops": 2200,
+      "elapsedMs": 3,
+      "throughput": 733333.3333333334
+    }
+  }
+}

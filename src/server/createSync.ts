@@ -43,6 +43,11 @@ const mutateSchema = z.discriminatedUnion('op', [
 		table: z.string(),
 		pk: pkSchema,
 		clientOpId: z.string().optional()
+	}),
+	z.object({
+		op: z.literal('batch'),
+		ops: z.array(z.any()),
+		clientOpId: z.string().optional()
 	})
 ]);
 
