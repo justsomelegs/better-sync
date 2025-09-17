@@ -21,7 +21,7 @@ export function createSseStream(config?: SseConfig) {
 		}
 	}
 
-	function handler(opts: { bufferMs: number; cap: number; lastEventId?: string; signal?: AbortSignal }) {
+	function handler(opts: { bufferMs: number; cap: number; lastEventId?: string; signal?: AbortSignal; debug?: boolean }) {
 		let timer: NodeJS.Timeout | null = null;
 		let send: ((frame: string) => void) | null = null;
 		return new Response(new ReadableStream<Uint8Array>({
@@ -32,6 +32,10 @@ export function createSseStream(config?: SseConfig) {
 					const idx = ring.findIndex((e) => e.id === opts.lastEventId);
 					if (idx >= 0) {
 						for (const e of ring.slice(idx + 1)) controller.enqueue(encoder.encode(e.frame));
+						if (opts.debug) { try { console.debug('[just-sync] SSE replay', ring.length - (idx + 1)); } catch {} }
+					} else {
+						// Signal resume miss so clients can perform a fresh snapshot
+						controller.enqueue(encoder.encode('event: recover\ndata: {}\n\n'));
 					}
 				}
 				send = (frame: string) => controller.enqueue(encoder.encode(frame));

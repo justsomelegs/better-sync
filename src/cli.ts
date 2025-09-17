@@ -67,13 +67,21 @@ function normalizeTables(appSchema: AppSchema): Array<{ name: string; pk: string
 }
 
 function ddlForTable(table: { name: string; pk: string[]; updatedAt: string }): string {
-	// Canonical MVP DDL: single 'id' primary key with per-table updatedAt
 	const updatedAtCol = table.updatedAt || 'updatedAt';
-	const colDefs = [
-		`  id TEXT PRIMARY KEY`,
-		`  ${updatedAtCol} INTEGER`
-	];
-	return `CREATE TABLE IF NOT EXISTS ${table.name} (\n${colDefs.join(',\n')}\n);`;
+	if (table.pk.length === 1) {
+		const idCol = table.pk[0];
+		const colDefs = [
+			`  ${idCol} TEXT PRIMARY KEY`,
+			`  ${updatedAtCol} INTEGER`
+		];
+		const idx = `CREATE INDEX IF NOT EXISTS idx_${table.name}_${updatedAtCol} ON ${table.name}(${updatedAtCol});`;
+		return `CREATE TABLE IF NOT EXISTS ${table.name} (\n${colDefs.join(',\n')}\n);\n${idx}`;
+	}
+	const cols = table.pk.map((k) => `  ${k} TEXT`);
+	cols.push(`  ${updatedAtCol} INTEGER`);
+	const pkClause = `  PRIMARY KEY (${table.pk.join(', ')})`;
+	const idx = `CREATE INDEX IF NOT EXISTS idx_${table.name}_${updatedAtCol} ON ${table.name}(${updatedAtCol});`;
+	return `CREATE TABLE IF NOT EXISTS ${table.name} (\n${cols.join(',\n')},\n${pkClause}\n);\n${idx}`;
 }
 
 async function transpileTsToMjs(tsPath: string): Promise<string> {

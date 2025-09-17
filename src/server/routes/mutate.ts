@@ -11,6 +11,7 @@ export function buildPostMutate(deps: {
 	ulid: () => string;
 	idem: IdempotencyStore;
 	emit: (type: 'mutation', data: Record<string, unknown>) => void;
+  getContext?: (req: Request) => unknown | Promise<unknown>;
 }) {
 	const { db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit } = deps;
 	return createEndpoint('/mutate', {
@@ -18,7 +19,13 @@ export function buildPostMutate(deps: {
 		body: mutateSchema
 	}, async (ctx) => {
 		const body = ctx.body as any;
-		const opId = body.clientOpId ?? ulid();
+		const req = (ctx as unknown as { request?: Request }).request;
+		const headerKey = req?.headers.get('Idempotency-Key') || undefined;
+		const opId = headerKey ?? body.clientOpId ?? ulid();
+		if (body.op === 'insert' || body.op === 'upsert') {
+			const rows = Array.isArray(body.rows) ? body.rows : (body.row ? [body.row] : (body.rows ? [body.rows] : []));
+			if (rows.length > 100) { throw new SyncError('BAD_REQUEST', 'Max batch size exceeded', { max: 100 }); }
+		}
 		if (await Promise.resolve(idem.has(opId))) {
 			const prev = await Promise.resolve(idem.get(opId));
 			return { ...(prev as object), duplicated: true } as any;
@@ -104,16 +111,26 @@ export function buildPostMutate(deps: {
 				const rows = Array.isArray((result as any).rows) ? (result as any).rows : [(result as any).row];
 				const pks = rows.map((r: any) => r.id);
 				const rowVersions: Record<string, number> = {};
+				const diffs: Record<string, { set?: Record<string, unknown>; unset?: string[] }> = {};
 				for (const r of rows) {
 					if (r.id && typeof r.version === 'number') rowVersions[r.id] = r.version as number;
+					if (r.id) diffs[String(r.id)] = { set: r as any };
 				}
-				emit('mutation', { txId, tables: [{ name: body.table, type: 'mutation', pks, rowVersions }] });
+				emit('mutation', { txId, tables: [{ name: body.table, type: 'mutation', pks, rowVersions, diffs }] });
 			} else if (body.op === 'update') {
 				const rid = (result as any).row?.id ?? canonicalPkValue(body.pk as PrimaryKey);
 				const rv: Record<string, number> = {};
 				const ver = (result as any).row?.version;
 				if (rid && typeof ver === 'number') rv[String(rid)] = ver as number;
-				emit('mutation', { txId, tables: [{ name: body.table, type: 'mutation', pks: [rid], rowVersions: rv }] });
+				const setFields: Record<string, unknown> = {};
+				if (body?.set && typeof body.set === 'object') {
+					for (const k of Object.keys(body.set)) setFields[k] = (body.set as any)[k];
+				}
+				if ((result as any).row?.updatedAt != null) setFields['updatedAt'] = (result as any).row.updatedAt;
+				if (typeof ver === 'number') setFields['version'] = ver;
+				const diffs: Record<string, { set?: Record<string, unknown>; unset?: string[] }> = {};
+				if (rid) diffs[String(rid)] = { set: setFields };
+				emit('mutation', { txId, tables: [{ name: body.table, type: 'mutation', pks: [rid], rowVersions: rv, diffs }] });
 			} else if (body.op === 'delete') {
 				emit('mutation', { txId, tables: [{ name: body.table, type: 'mutation', pks: [typeof body.pk === 'object' ? canonicalPkValue(body.pk as PrimaryKey) : body.pk] }] });
 			}

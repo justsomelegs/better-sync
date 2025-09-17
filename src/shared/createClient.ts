@@ -12,6 +12,7 @@ type SelectArgs = {
 type MutationResult = any;
 
 import type { LocalStore } from '../storage/client';
+import { SyncHttpError } from './errors';
 import type { ClientMutators, MutatorsSpec, ServerMutatorsSpec, ClientMutatorsFromServer } from './types';
 
 type WatchArgs = string | { table: string; where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number };
@@ -21,18 +22,24 @@ type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number };
 
 type RealtimeMode = 'sse' | 'poll' | 'off';
 
-export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number }) {
+export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
   const pollIntervalMs = config.pollIntervalMs ?? 1500;
+  const defaults = { debounceMs: config.defaults?.debounceMs ?? 20, pageLimit: config.defaults?.pageLimit ?? 100 } as const;
+  const hooks = { onError: config.hooks?.onError, onRetry: config.hooks?.onRetry } as const;
+  const debug = !!config.debug;
+  const baseBackoffMs = config.reconnectBackoff?.baseMs ?? 500;
+  const maxBackoffMs = config.reconnectBackoff?.maxMs ?? 5000;
+  const jitterMs = config.reconnectBackoff?.jitterMs ?? 250;
   let storePromise: Promise<LocalStore> | null = null;
   if (config.datastore) storePromise = Promise.resolve(config.datastore);
   async function getStore(): Promise<LocalStore | null> { return storePromise ? storePromise : null; }
 
   // per-table cache and watchers with options
   const cache = new Map<string, Map<string, any>>();
-  const watchers = new Map<string, Set<{ fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number } }>>();
+  const watchers = new Map<string, Set<{ fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number }; status: 'connecting'|'live'|'retrying'; error?: Error; lastData?: any[]; pollTimer?: any }>>();
   function getTable(table: string) {
     let t = cache.get(table);
     if (!t) { t = new Map(); cache.set(table, t); }
@@ -40,16 +47,27 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   }
   function notify(table: string, evt: WatchEvent) {
     const set = watchers.get(table);
-    if (set) for (const { fn } of set) { try { fn(evt); } catch { } }
+    if (set) for (const entry of set) { try { entry.fn(evt); } catch { } }
   }
 
   async function postJson(path: string, body: unknown) {
-    const res = await fetchImpl(`${baseURL}${path}`, {
+    const url = `${baseURL}${path}`;
+    const started = Date.now();
+    const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (debug) {
+      try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
+    }
+    if (!res.ok) {
+      let payload: any = null;
+      try { payload = await res.json(); } catch {}
+      const err = new SyncHttpError(payload?.code || 'INTERNAL', payload?.message || `HTTP ${res.status}`, res.status, payload?.details);
+      if (hooks.onError) try { hooks.onError(err); } catch {}
+      throw err;
+    }
     return res;
   }
 
@@ -239,7 +257,9 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   let sseRunning = false;
   let lastEventId: string | null = null;
   const seenEventIds = new Set<string>();
+  const maxSeen = 5000;
   const tableDebounce = new Map<string, any>();
+  let retryAttempt = 0;
 
   async function startSseIfNeeded() {
     if (sseRunning || realtimeMode !== 'sse') return;
@@ -249,8 +269,11 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     try {
       const headers: Record<string, string> = {};
       if (lastEventId) headers['Last-Event-ID'] = lastEventId;
+      if (debug) { try { console.debug('[just-sync] SSE connect', { lastEventId }); } catch {} }
       const res = await fetchImpl(`${baseURL}/events`, { signal: sseAC.signal, headers });
       if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
+      retryAttempt = 0;
+      if (debug) { try { console.debug('[just-sync] SSE connected'); } catch {} }
       const reader = res.body.getReader();
       const td = new TextDecoder();
       let buffer = '';
@@ -269,6 +292,15 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
             lastEventId = eid;
             if (seenEventIds.has(eid)) continue;
             seenEventIds.add(eid);
+            if (seenEventIds.size > maxSeen) {
+              // prune oldest half by recreating set (iteration order is insertion order for Set)
+              const keep = Math.floor(maxSeen / 2);
+              const next = new Set<string>();
+              let i = 0;
+              for (const v of seenEventIds) { if (i++ >= keep) break; next.add(v); }
+              seenEventIds.clear();
+              for (const v of next) seenEventIds.add(v);
+            }
           }
           if (f.includes('event: mutation')) {
             const dataLine = f.split('\n').find((l) => l.startsWith('data: '));
@@ -279,21 +311,42 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
             for (const t of tables) {
               const tableName = t?.name as string;
               if (!tableName || !watchers.has(tableName)) continue;
-              // immediate notify
-              notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              // Try apply diffs immediately when provided
+              const diffs = (t && t.diffs) || null;
+              if (diffs && typeof diffs === 'object') {
+                const tableCache = getTable(tableName);
+                for (const [rid, diff] of Object.entries(diffs as Record<string, { set?: any; unset?: string[] }>)) {
+                  const key = String(rid);
+                  const prev = tableCache.get(key) || {};
+                  const next = { ...prev, ...(diff.set || {}) };
+                  if (Array.isArray(diff.unset)) {
+                    for (const k of diff.unset) delete (next as any)[k];
+                  }
+                  tableCache.set(key, next);
+                }
+                notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              } else {
+                // no diffs: notify and debounce snapshot
+                notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              }
               // debounce snapshot per table: run per watcher with its args
               if (tableDebounce.get(tableName)) continue;
-              const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? 20;
+              const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? defaults.debounceMs;
               tableDebounce.set(tableName, setTimeout(async () => {
                 tableDebounce.delete(tableName);
                 const subs = watchers.get(tableName);
                 if (!subs || subs.size === 0) return;
-                for (const { fn, args } of subs) {
+                for (const entry of subs) {
                   try {
-                    const res = await select({ table: tableName, where: args.where, select: args.select, orderBy: args.orderBy, limit: args.limit });
-                    fn({ table: tableName, data: res.data });
+                    const res = await select({ table: tableName, where: entry.args.where, select: entry.args.select, orderBy: entry.args.orderBy, limit: entry.args.limit });
+                    entry.lastData = res.data;
+                    entry.status = 'live';
+                    entry.error = undefined;
+                    entry.fn({ table: tableName, data: res.data });
                   } catch (e: any) {
-                    fn({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
+                    entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
+                    entry.status = 'retrying';
+                    entry.fn({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
                   }
                 }
               }, delay));
@@ -302,12 +355,18 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
         }
       }
     } catch (e) {
-      // surface error to all watchers
-      for (const [tableName, subs] of watchers) for (const { fn } of subs) fn({ table: tableName, error: { code: 'INTERNAL', message: String((e as any)?.message || e) } });
+      // surface error to all watchers and mark retrying
+      for (const [tableName, subs] of watchers) for (const entry of subs) { entry.status = 'retrying'; entry.error = e as any; entry.fn({ table: tableName, error: { code: 'INTERNAL', message: String((e as any)?.message || e) } }); }
     } finally {
       sseRunning = false;
       if (watchers.size > 0 && realtimeMode === 'sse') {
-        setTimeout(() => { if (!sseRunning) startSseIfNeeded(); }, 500);
+        retryAttempt = Math.min(retryAttempt + 1, 1000);
+        if (hooks.onRetry) { try { hooks.onRetry({ attempt: retryAttempt, reason: undefined }); } catch {} }
+        const exp = Math.min(baseBackoffMs * Math.pow(2, retryAttempt - 1), maxBackoffMs);
+        const jitter = Math.floor(Math.random() * jitterMs);
+        const delay = Math.min(exp + jitter, maxBackoffMs);
+        if (debug) { try { console.debug('[just-sync] SSE retry', { attempt: retryAttempt, delay }); } catch {} }
+        setTimeout(() => { if (!sseRunning) startSseIfNeeded(); }, delay);
       }
     }
   }
@@ -320,7 +379,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     const tableName = typeof table === 'string' ? table : table.table;
     let set = watchers.get(tableName);
     if (!set) { set = new Set(); watchers.set(tableName, set); }
-    const entry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit } };
+    const entry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit }, status: 'connecting' as const };
     set.add(entry);
 
     // initial snapshot (default true)
@@ -330,12 +389,18 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       try {
         if (typeof table === 'string') {
           const win = await select({ table: tableName, limit: 1 });
+          entry.lastData = win.data;
+          entry.status = 'live';
           onChange({ table: tableName, data: win.data });
         } else {
           const res = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+          entry.lastData = res.data;
+          entry.status = 'live';
           onChange({ table: tableName, data: res.data });
         }
       } catch (e: any) {
+        entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
+        entry.status = 'retrying';
         onChange({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
       }
     })();
@@ -349,23 +414,38 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
         try {
           if (typeof table === 'string') {
             const data = await select({ table: tableName, limit: 1 });
+            entry.lastData = data.data;
+            entry.status = 'live';
             onChange({ table: tableName, data: data.data });
           } else {
             const data = await select({ table: tableName, where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit });
+            entry.lastData = data.data;
+            entry.status = 'live';
             onChange({ table: tableName, data: data.data });
           }
         } catch (e: any) {
+          entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
+          entry.status = 'retrying';
           onChange({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
         }
       }, pollIntervalMs);
     }
 
-    return () => {
-      if (pollTimer) clearInterval(pollTimer);
+    entry.pollTimer = pollTimer;
+    const unsubscribe = () => {
+      if (entry.pollTimer) clearInterval(entry.pollTimer);
       const s = watchers.get(tableName);
       if (s) { s.delete(entry); if (s.size === 0) watchers.delete(tableName); }
       stopSseIfIdle();
     };
+    const handle: any = unsubscribe;
+    Object.defineProperties(handle, {
+      unsubscribe: { value: unsubscribe },
+      status: { get: () => entry.status },
+      error: { get: () => entry.error ?? null },
+      getSnapshot: { value: () => entry.lastData ?? null }
+    });
+    return handle as (() => void) & { unsubscribe: () => void; status: 'connecting'|'live'|'retrying'; error: Error|null; getSnapshot: () => any[]|null };
   }
 
   const local = {
@@ -381,7 +461,21 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     }
   };
 
-  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, rows, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local } as const;
+  function close() {
+    // Abort SSE and clear timers
+    if (sseAC) { try { sseAC.abort(); } catch { } sseAC = null; }
+    sseRunning = false;
+    // Clear table debounce timers
+    for (const [, t] of tableDebounce) { try { clearTimeout(t); } catch { } }
+    tableDebounce.clear();
+    // Unsubscribe all watchers
+    for (const [, set] of watchers) {
+      for (const entry of set) { if (entry.pollTimer) clearInterval(entry.pollTimer); }
+    }
+    watchers.clear();
+  }
+
+  const api = { config: { baseURL }, select, insert, update, updateWhere, delete: del, deleteWhere, upsert: (table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { merge?: string[]; clientOpId?: string }) => postJson('/mutate', { op: 'upsert', table, rows, merge: opts?.merge, clientOpId: opts?.clientOpId }).then(r => r.json()), mutator, watch, local, close } as const;
   type TableApi = {
     select(args: Omit<SelectArgs, 'table'>): Promise<{ data: any[]; nextCursor: string | null }>;
     insert(row: Record<string, unknown>, opts?: { clientOpId?: string }): Promise<MutationResult>;

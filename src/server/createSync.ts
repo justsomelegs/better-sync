@@ -7,6 +7,7 @@ import { monotonicFactory } from 'ulid';
 import { createSseStream } from './sse';
 import { normalizeSchemaObject } from './utils';
 import { responseFromError, SyncError } from '../shared/errors';
+import { withRequestId } from './errors_middleware';
 import { buildPostMutate } from './routes/mutate';
 import { buildPostSelect } from './routes/select';
 import { buildPostMutator } from './routes/mutators';
@@ -67,7 +68,7 @@ function chooseStampedId(ulidGen: () => string, provided: unknown): string {
 	return (isValidUlid(provided) || looksLikeCompositeCanonical(provided)) ? String(provided) : ulidGen();
 }
 
-export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number }; autoMigrate?: boolean }) {
+export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number }; autoMigrate?: boolean; context?: (req: Request) => unknown | Promise<unknown> }) {
 	const db = config.database;
 	const idem: IdempotencyStore = config.idempotencyStore ?? createMemoryIdempotencyStore();
 	let versionCounter = 0;
@@ -114,15 +115,15 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		return sse.handler({ bufferMs: config.sse?.bufferMs ?? 60000, cap: config.sse?.bufferCap ?? 10000, lastEventId: since ?? undefined, signal: req?.signal });
 	});
 
-	const postMutate = buildPostMutate({ db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit });
+	const postMutate = buildPostMutate({ db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit, getContext: config.context });
 	const postSelect = buildPostSelect(db, selectSchema);
-	const postMutator = buildPostMutator(db, config.mutators, ulid, idem);
+	const postMutator = buildPostMutator(db, config.mutators, ulid, idem, config.context);
 
 	const router = createRouter({ getEvents, postMutate, postSelect, postMutator });
 
 	const handler = router.handler;
 
-	const fetch = async (req: Request): Promise<Response> => handler(req);
+	const fetch = withRequestId(async (req: Request): Promise<Response> => handler(req));
 
-	return { handler, fetch, mutators: (config.mutators ?? ({} as TMutators)) } as const;
+	return { handler: (req: Request) => fetch(req), fetch, mutators: (config.mutators ?? ({} as TMutators)) } as const;
 }

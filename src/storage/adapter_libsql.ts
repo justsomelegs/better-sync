@@ -1,9 +1,10 @@
 import { createAdapter } from './adapter';
 import type { DatabaseAdapter } from '../shared/types';
-import { canonicalPk, decodeCursor, encodeCursor, mapSqlErrorToCode } from './utils';
+import { canonicalPk, decodeWindowCursor, encodeWindowCursor, defaultOrderBy, mapSqlErrorToCode } from './utils';
 import { SyncError } from '../shared/errors';
 
 export function libsqlAdapter(config: { url: string; authToken?: string }): DatabaseAdapter {
+	let txClient: any | null = null;
 	async function getClient() {
 		try {
 			const mod: any = await import('@libsql/client');
@@ -14,10 +15,26 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 		}
 	}
 	async function run(sql: string, params?: any[]) {
-		const c = await getClient();
+		const c = txClient || await getClient();
 		return c.execute({ sql, args: params || [] });
 	}
 	return createAdapter({
+		async begin() {
+			if (txClient) return;
+			const mod: any = await import('@libsql/client');
+			txClient = mod.createClient({ url: config.url, authToken: (config as any).authToken });
+			await txClient.execute('BEGIN');
+		},
+		async commit() {
+			if (!txClient) return;
+			await txClient.execute('COMMIT');
+			txClient = null;
+		},
+		async rollback() {
+			if (!txClient) return;
+			try { await txClient.execute('ROLLBACK'); } catch {}
+			txClient = null;
+		},
 		async ensureMeta() {
 			await run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
 		},
@@ -28,7 +45,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			try {
 				await run(sql, cols.map((k) => (row as any)[k]));
 			} catch (e: any) {
-				const err: any = new Error(e?.message || 'insert failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table }; throw err;
+				throw new SyncError(mapSqlErrorToCode(String(e?.message || '')), e?.message || 'insert failed', { table });
 			}
 			if ((row as any).id != null && typeof (row as any).version === 'number') {
 				const id = String((row as any).id);
@@ -38,11 +55,17 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 		},
 		async updateByPk(table, pk, set, opts) {
 			const key = canonicalPk(pk);
+			if (opts?.ifVersion != null) {
+				const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`, [table, key]);
+				const row0 = vres.rows?.[0];
+				const metaVer = row0 ? Number(rowFromLibsql(row0)?.version) : null;
+				if (metaVer != null && metaVer !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: metaVer }); }
+			}
 			const cols = Object.keys(set).filter((c) => c !== 'version');
 			if (cols.length > 0) {
 				const assigns = cols.map((c) => `${c} = ?`).join(',');
 				const sql = `UPDATE ${table} SET ${assigns} WHERE id = ?`;
-				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { const err: any = new Error(e?.message || 'update failed'); err.code = mapSqlErrorToCode(String(e?.message || '')); err.details = { table, pk: key }; throw err; }
+				try { await run(sql, [...cols.map((c) => (set as any)[c]), key]); } catch (e: any) { throw new SyncError(mapSqlErrorToCode(String(e?.message || '')), e?.message || 'update failed', { table, pk: key }); }
 			}
 			if ((set as any).version != null) {
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?,?,?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=excluded.version`, [table, key, (set as any).version]);
@@ -70,25 +93,43 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			const out: any = {}; for (const f of select) out[f] = full[f]; return out;
 		},
 		async selectWindow(table, req: any) {
-			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? { updatedAt: 'desc' };
+			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? defaultOrderBy();
 			const keys = Object.keys(orderBy);
 			let where = '';
 			const params: any[] = [];
-			const { lastId } = decodeCursor(req.cursor);
-			if (lastId) { where = 'WHERE id > ?'; params.push(lastId); }
-			let sql = `SELECT * FROM ${table} ${where}`;
+			const cur = decodeWindowCursor(req.cursor);
+			if (cur.lastId) {
+				if (keys.length === 1 && keys[0] === 'updatedAt' && (orderBy as any).updatedAt === 'desc') {
+					let lastUpdated: number | null = (cur.lastKeys as any)?.updatedAt as any;
+					if (lastUpdated == null) {
+						const q = await run(`SELECT updatedAt FROM ${table} WHERE id = ? LIMIT 1`, [cur.lastId]);
+						lastUpdated = (q.rows && q.rows[0] && (rowFromLibsql(q.rows[0]) as any).updatedAt) ?? 0;
+					}
+					where = 'WHERE (t.updatedAt < ?) OR (t.updatedAt = ? AND t.id > ?)';
+					params.push(lastUpdated, lastUpdated, cur.lastId);
+				} else {
+					where = 'WHERE t.id > ?';
+					params.push(cur.lastId);
+				}
+			}
+			let sql = `SELECT t.* FROM ${table} t ${where}`;
 			if (keys.length > 0) {
-				const ord = keys.map((k) => `${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
-				sql += ` ORDER BY ${ord}, id ASC`;
+				const ord = keys.map((k) => `t.${k} ${(orderBy[k] ?? 'asc').toUpperCase()}`).join(', ');
+				sql += ` ORDER BY ${ord}, t.id ASC`;
 			} else {
-				sql += ` ORDER BY id ASC`;
+				sql += ` ORDER BY t.id ASC`;
 			}
 			const limit = typeof req.limit === 'number' ? req.limit : 100;
 			sql += ` LIMIT ?`; params.push(limit);
 			const res = await run(sql, params);
 			const rows = (res.rows || []).map(rowFromLibsql);
 			let nextCursor: string | null = null;
-			if (rows.length === limit) { const last = rows[rows.length - 1]; nextCursor = encodeCursor(String((last as any).id)); }
+			if (rows.length === limit) {
+				const last = rows[rows.length - 1] as any;
+				const lastKeys: Record<string, string | number> = {};
+				for (const k of keys) lastKeys[k] = last[k];
+				nextCursor = encodeWindowCursor({ table, orderBy, last: { keys: lastKeys, id: String(last.id) } });
+			}
 			return { data: rows, nextCursor };
 		}
 	});
