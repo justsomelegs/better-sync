@@ -8,7 +8,7 @@ import { SyncError } from '../shared/errors';
 
 // URL builder intentionally removed to keep adapter DX explicit
 
-export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
+export function sqliteAdapter(_config: { url: string; flushMode?: 'sync' | 'async' | 'off' }): DatabaseAdapter {
   // In-memory SQLite via sql.js (sufficient for MVP & tests)
   const filePath = _config.url?.startsWith('file:') ? resolvePath(_config.url.slice('file:'.length)) : null;
   const ready = initSqlJs({ locateFile: (f: string) => `node_modules/sql.js/dist/${f}` }).then(async (SQL) => {
@@ -39,7 +39,31 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
   return {
     async ensureMeta() { const db = await ready; db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; },
     async begin() { const db = await ready; if (txDepth === 0) db.run('BEGIN'); txDepth++; },
-    async commit() { const db = await ready; if (txDepth > 0) { txDepth--; if (txDepth === 0) { db.run('COMMIT'); if (filePath) { const data = db.export(); await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { }); await fs.writeFile(filePath, Buffer.from(data)); } } } },
+    async commit() {
+      const db = await ready;
+      if (txDepth > 0) {
+        txDepth--;
+        if (txDepth === 0) {
+          db.run('COMMIT');
+          if (filePath) {
+            const mode = _config.flushMode ?? 'sync';
+            if (mode === 'off') {
+              // skip flush for lowest latency
+            } else if (mode === 'async') {
+              // fire-and-forget flush to disk
+              try {
+                const data = db.export();
+                void fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).then(() => fs.writeFile(filePath, Buffer.from(data))).catch(() => {});
+              } catch {}
+            } else {
+              const data = db.export();
+              await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { });
+              await fs.writeFile(filePath, Buffer.from(data));
+            }
+          }
+        }
+      }
+    },
     async rollback() { const db = await ready; if (txDepth > 0) { db.run('ROLLBACK'); txDepth = 0; } },
     async insert(table: string, row: Record<string, any>) {
       const db = await ready;

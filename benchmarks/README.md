@@ -30,8 +30,9 @@ How to run
 Environment variables
 - BENCH_ROWS: Number of rows to insert/select (default: 2000)
 - BENCH_FILE: File path for SQLite (default: OS tmp dir)
- - BENCH_JSON: When '1', emits structured JSON rather than console.table
- - JS_BENCH_BASELINE: When '1', sqlite adapter runs slower, legacy-like path
+- BENCH_JSON: When '1', emits structured JSON rather than console.table
+- JS_BENCH_BASELINE: When '1', sqlite adapter runs slower, legacy-like path
+- BENCH_FLUSH_MODE: 'sync' | 'async' | 'off' to control file flush latency
 
 Notes
 - These are micro-benchmarks intended to compare relative performance and detect regressions.

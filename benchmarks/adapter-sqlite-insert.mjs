@@ -33,7 +33,7 @@ const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_sqlite_${Date.now
 const dbUrl = `file:${dbFile}`;
 const JSON_MODE = process.env.BENCH_JSON === '1';
 
-const db = sqliteAdapter({ url: dbUrl });
+const db = sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 await db.ensureMeta?.();
 const schema = { bench_items: { schema: z.object({ id: z.string().optional(), name: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 const sync = createSync({ schema, database: db, autoMigrate: true });
@@ -62,6 +62,7 @@ if (JSON_MODE) {
 		name: 'client-insert',
 		rows,
 		elapsedMs,
+		ops: rows / (elapsedMs / 1000),
 		node: process.version,
 		adapter: 'sqlite(sql.js)',
 	};

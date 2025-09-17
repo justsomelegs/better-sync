@@ -33,12 +33,23 @@ Optimized (after reducing redundant table/meta DDL, avoiding double fetch in ups
 {"name":"client-insert","rows":2000,"elapsedMs":4472,"node":"v22.16.0","adapter":"sqlite(sql.js)"}
 {"name":"client-insert-e2e","rows":2000,"elapsedMs":4391,"node":"v22.16.0","adapter":"sqlite(sql.js)"}
 {"name":"client-select-window","rows":2000,"elapsedMs":512,"node":"v22.16.0","adapter":"sqlite(sql.js)"}
-{"name":"notify-latency","iterations":2000,"elapsedMs":16098,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":3,"p90":4,"p99":5,"avg":3}
+{"name":"notify-latency","iterations":2000,"elapsedMs":16098,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":3,"p90":4,"p99":5,"avg":3,"ops":124.2575894236216}
 ```
 
 Notes:
 - Insert throughput improved ~4–6% in this environment.
 - Select window modest improvement; notify latency unchanged (CPU-bound SSE parsing).
+
+#### 2025-09-17 – Notify latency with flush tuning
+
+```json
+{"name":"notify-latency","iterations":2000,"elapsedMs":15861,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":3,"p90":4,"p99":5,"avg":3,"ops":126.09545425887396}
+{"name":"notify-latency","iterations":2000,"elapsedMs":13444,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":1,"p90":2,"p99":3,"avg":1,"ops":148.76524843796489}
+```
+
+Notes:
+- Setting BENCH_FLUSH_MODE=off significantly reduced p50/p90/p99 latency and improved ops/s in this environment.
+- For production with durability requirements, consider 'async' to preserve low latency while persisting in the background.
 
 > just-sync@0.0.0 bench:json
 > BENCH_JSON=1 node benchmarks/adapter-sqlite-insert.mjs && BENCH_JSON=1 node benchmarks/server-mutate-insert.mjs && BENCH_JSON=1 node benchmarks/server-select-window.mjs && BENCH_JSON=1 node benchmarks/notify-latency.mjs
@@ -63,3 +74,7 @@ E2E client.select window over 2000 rows...
 {"name":"client-select-window","rows":2000,"elapsedMs":512,"node":"v22.16.0","adapter":"sqlite(sql.js)"}
 Benchmarking notify latency over 2000 iterations (client.watch)...
 {"name":"notify-latency","iterations":2000,"elapsedMs":16098,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":3,"p90":4,"p99":5,"avg":3}
+Benchmarking notify latency over 2000 iterations (client.watch)...
+{"name":"notify-latency","iterations":2000,"elapsedMs":15861,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":3,"p90":4,"p99":5,"avg":3,"ops":126.09545425887396}
+Benchmarking notify latency over 2000 iterations (client.watch)...
+{"name":"notify-latency","iterations":2000,"elapsedMs":13444,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":1,"p90":2,"p99":3,"avg":1,"ops":148.76524843796489}

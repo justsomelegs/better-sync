@@ -29,7 +29,7 @@ const rows = Number(process.env.BENCH_ROWS || 2000);
 const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_select_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
 const JSON_MODE = process.env.BENCH_JSON === '1';
-const db = sqliteAdapter({ url: dbUrl });
+const db = sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 const schema = { bench_items: { schema: z.object({ id: z.string().optional(), name: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
 // Seed
@@ -61,7 +61,7 @@ const t0 = Date.now();
 await bench.run();
 const elapsedMs = Date.now() - t0;
 if (JSON_MODE) {
-  const out = { name: 'client-select-window', rows, elapsedMs, node: process.version, adapter: 'sqlite(sql.js)' };
+  const out = { name: 'client-select-window', rows, elapsedMs, ops: rows / (elapsedMs / 1000), node: process.version, adapter: 'sqlite(sql.js)' };
   console.log(JSON.stringify(out));
 } else {
   console.table(bench.table());

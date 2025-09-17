@@ -30,7 +30,7 @@ const dbFile = join(tmpdir(), `bench_notify_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
 const JSON_MODE = process.env.BENCH_JSON === '1';
 
-const db = sqliteAdapter({ url: dbUrl });
+const db = sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 const schema = { bench_notes: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
 const sync = createSync({ schema, database: db, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000 } });
@@ -86,8 +86,9 @@ if (JSON_MODE) {
     p50: percentile(latencies, 50),
     p90: percentile(latencies, 90),
     p99: percentile(latencies, 99),
-    avg: average(latencies)
-  } : { p50: null, p90: null, p99: null, avg: null };
+    avg: average(latencies),
+    ops: latencies.length / (elapsedMs / 1000)
+  } : { p50: null, p90: null, p99: null, avg: null, ops: null };
   const out = { name: 'notify-latency', iterations: ITER, elapsedMs, node: process.version, adapter: 'sqlite(sql.js)', ...summary };
   console.log(JSON.stringify(out));
 } else {
