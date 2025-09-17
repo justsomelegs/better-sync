@@ -23,45 +23,53 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     return new SQL.Database();
   });
   let txDepth = 0;
+  let metaEnsured = false;
+  const ensuredTables = new Set<string>();
+  const ensuredMinimal = new Set<string>();
+  let dirtySinceExport = false;
   async function ensureTable(db: any, table: string, row: Record<string, unknown>) {
+    if (ensuredTables.has(table)) return;
     const cols = Object.keys(row).filter((c) => c !== 'version');
     if (cols.length === 0) return;
     const defs = cols.map((c) => c === 'id' ? `${c} TEXT PRIMARY KEY` : `${c} TEXT`).join(',');
     db.run(`CREATE TABLE IF NOT EXISTS ${table} (${defs})`);
+    ensuredTables.add(table);
   }
   async function ensureMinimalTable(db: any, table: string) {
+    if (ensuredMinimal.has(table)) return;
     db.run(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, updatedAt INTEGER)`);
+    ensuredMinimal.add(table);
   }
   return {
-    async ensureMeta() { const db = await ready; db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); },
+    async ensureMeta() { const db = await ready; if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; } },
     async begin() { const db = await ready; if (txDepth === 0) db.run('BEGIN'); txDepth++; },
-    async commit() { const db = await ready; if (txDepth > 0) { txDepth--; if (txDepth === 0) { db.run('COMMIT'); if (filePath) { const data = db.export(); await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { }); await fs.writeFile(filePath, Buffer.from(data)); } } } },
+    async commit() { const db = await ready; if (txDepth > 0) { txDepth--; if (txDepth === 0) { db.run('COMMIT'); if (filePath && dirtySinceExport) { const data = db.export(); await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { }); await fs.writeFile(filePath, Buffer.from(data)); dirtySinceExport = false; } } } },
     async rollback() { const db = await ready; if (txDepth > 0) { db.run('ROLLBACK'); txDepth = 0; } },
     async insert(table: string, row: Record<string, any>) {
       const db = await ready;
-      db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
+      if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; }
       await ensureTable(db, table, row);
-      // Unique check on id
-      if (row.id != null) {
-        const s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`);
-        s.bind([String(row.id)]);
-        const exists = s.step();
-        s.free();
-        if (exists) { throw new SyncError('CONFLICT', 'duplicate', { constraint: 'unique', column: 'id' }); }
-      }
       const cols = Object.keys(row).filter((c) => c !== 'version');
       const placeholders = cols.map(() => '?').join(',');
-      db.run(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`, cols.map(k => (row as any)[k]));
+      try {
+        db.run(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`, cols.map(k => (row as any)[k]));
+      } catch (e: any) {
+        const msg = String(e?.message || e);
+        if (msg.includes('UNIQUE') || msg.includes('PRIMARY KEY')) { throw new SyncError('CONFLICT', 'duplicate', { constraint: 'unique', column: 'id' }); }
+        throw e;
+      }
+      dirtySinceExport = dirtySinceExport || !!filePath;
       // mirror version into meta if provided
       if (row.id != null && typeof row.version === 'number') {
         const pk = String(row.id);
         db.run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?, ?, ?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version = excluded.version`, [table, pk, row.version]);
+        dirtySinceExport = dirtySinceExport || !!filePath;
       }
       return { ...row };
     },
     async updateByPk(table: string, pk: PrimaryKey, set: Record<string, any>, opts?: { ifVersion?: number }) {
       const db = await ready;
-      db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
+      if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; }
       const key = canonicalPk(pk);
       let g: any;
       try { g = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`); }
@@ -82,6 +90,7 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       if (typeof next.version === 'number') {
         db.run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?, ?, ?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version = excluded.version`, [table, key, next.version]);
       }
+      dirtySinceExport = dirtySinceExport || !!filePath;
       const out = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
       out.bind([key]); const row = out.step() ? out.getAsObject() : null; out.free();
       if (!row) { throw new SyncError('NOT_FOUND', 'not found'); }
@@ -99,7 +108,9 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
       s.bind([key]); const existed = s.step(); s.free();
       if (!existed) { throw new SyncError('NOT_FOUND', 'not found'); }
       db.run(`DELETE FROM ${table} WHERE id = ?`, [key]);
+      if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; }
       db.run(`DELETE FROM _sync_versions WHERE table_name = ? AND pk_canonical = ?`, [table, key]);
+      dirtySinceExport = dirtySinceExport || !!filePath;
       return { ok: true } as const;
     },
     async selectByPk(table: string, pk: PrimaryKey, select?: string[]) {
