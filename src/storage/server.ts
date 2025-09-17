@@ -28,9 +28,23 @@ export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flus
   const ensuredMinimal = new Set<string>();
   let dirtySinceExport = false;
   const ensureIndex = new Set<string>();
-  const asyncFlush = !!_config.asyncFlush;
+  const asyncFlush = _config.asyncFlush != null ? !!_config.asyncFlush : !!filePath;
   const flushMs = typeof _config.flushMs === 'number' ? Math.max(1, _config.flushMs) : 5;
   let flushTimer: NodeJS.Timeout | null = null;
+  // Prepared statement simple pool keyed by SQL
+  const stmtPool = new Map<string, any[]>();
+  function acquireStmt(db: any, sql: string) {
+    const pool = stmtPool.get(sql);
+    if (pool && pool.length > 0) {
+      return pool.pop();
+    }
+    return db.prepare(sql);
+  }
+  function releaseStmt(sql: string, stmt: any) {
+    try { stmt.reset(); } catch {}
+    const pool = stmtPool.get(sql) ?? (stmtPool.set(sql, []), stmtPool.get(sql)!);
+    if (pool.length < 16) pool.push(stmt); else { try { stmt.free(); } catch {} }
+  }
   async function scheduleFlush(db: any) {
     if (!filePath) return;
     if (!dirtySinceExport) return;
@@ -96,13 +110,15 @@ export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flus
       if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; }
       const key = canonicalPk(pk);
       let g: any;
-      try { g = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`); }
+      const gSQL = `SELECT * FROM ${table} WHERE id = ? LIMIT 1`;
+      try { g = acquireStmt(db, gSQL); }
       catch (err: any) { throw new SyncError('NOT_FOUND', 'not found'); }
-      g.bind([key]); const cur = g.step() ? g.getAsObject() : null; g.free();
+      g.bind([key]); const cur = g.step() ? g.getAsObject() : null; releaseStmt(gSQL, g);
       if (!cur) { throw new SyncError('NOT_FOUND', 'not found'); }
       if (opts?.ifVersion != null) {
-        const v = db.prepare(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`);
-        v.bind([table, key]); const has = v.step(); const metaVer = has ? (v.getAsObject() as any).version : null; v.free();
+        const vSQL = `SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`;
+        const v = acquireStmt(db, vSQL);
+        v.bind([table, key]); const has = v.step(); const metaVer = has ? (v.getAsObject() as any).version : null; releaseStmt(vSQL, v);
         if (metaVer != null && metaVer !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: metaVer }); }
       }
       const next: any = { ...set };
@@ -115,21 +131,24 @@ export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flus
         db.run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?, ?, ?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version = excluded.version`, [table, key, next.version]);
       }
       dirtySinceExport = dirtySinceExport || !!filePath;
-      const out = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
-      out.bind([key]); const row = out.step() ? out.getAsObject() : null; out.free();
+      const outSQL = `SELECT * FROM ${table} WHERE id = ? LIMIT 1`;
+      const out = acquireStmt(db, outSQL);
+      out.bind([key]); const row = out.step() ? out.getAsObject() : null; releaseStmt(outSQL, out);
       if (!row) { throw new SyncError('NOT_FOUND', 'not found'); }
       // augment with version from meta
-      const v2 = db.prepare(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`);
-      v2.bind([table, key]); const has2 = v2.step(); const verOut = has2 ? (v2.getAsObject() as any).version : undefined; v2.free();
+      const v2SQL = `SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`;
+      const v2 = acquireStmt(db, v2SQL);
+      v2.bind([table, key]); const has2 = v2.step(); const verOut = has2 ? (v2.getAsObject() as any).version : undefined; releaseStmt(v2SQL, v2);
       return { ...(row as any), ...(verOut != null ? { version: verOut } : {}) } as any;
     },
     async deleteByPk(table: string, pk: PrimaryKey) {
       const db = await ready;
       const key = canonicalPk(pk);
       let s: any;
-      try { s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`); }
+      const dSQL = `SELECT id FROM ${table} WHERE id = ? LIMIT 1`;
+      try { s = acquireStmt(db, dSQL); }
       catch (err: any) { throw new SyncError('NOT_FOUND', 'not found'); }
-      s.bind([key]); const existed = s.step(); s.free();
+      s.bind([key]); const existed = s.step(); releaseStmt(dSQL, s);
       if (!existed) { throw new SyncError('NOT_FOUND', 'not found'); }
       db.run(`DELETE FROM ${table} WHERE id = ?`, [key]);
       if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; }
@@ -141,11 +160,13 @@ export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flus
       const db = await ready;
       await ensureMinimalTable(db, table);
       const key = canonicalPk(pk);
-      const s = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`);
-      s.bind([key]); const row = s.step() ? s.getAsObject() : null; s.free();
+      const sSQL = `SELECT * FROM ${table} WHERE id = ? LIMIT 1`;
+      const s = acquireStmt(db, sSQL);
+      s.bind([key]); const row = s.step() ? s.getAsObject() : null; releaseStmt(sSQL, s);
       if (!row) return null;
-      const v = db.prepare(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`);
-      v.bind([table, key]); const has = v.step(); const ver = has ? (v.getAsObject() as any).version : undefined; v.free();
+      const vSQL = `SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`;
+      const v = acquireStmt(db, vSQL);
+      v.bind([table, key]); const has = v.step(); const ver = has ? (v.getAsObject() as any).version : undefined; releaseStmt(vSQL, v);
       const full: any = { ...(row as any) };
       if (ver != null) full.version = ver;
       if (!select || select.length === 0) return full as any;

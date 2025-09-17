@@ -25,6 +25,17 @@ type RealtimeMode = 'sse' | 'poll' | 'off';
 export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
+  // Node: attach keep-alive agent by default for HTTP/HTTPS to reuse sockets
+  let agent: any = undefined;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const http = require('node:http');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const https = require('node:https');
+    const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 256 });
+    const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 256 });
+    agent = { http: httpAgent, https: httpsAgent };
+  } catch {}
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
   const pollIntervalMs = config.pollIntervalMs ?? 1500;
   const defaults = { debounceMs: config.defaults?.debounceMs ?? 20, pageLimit: config.defaults?.pageLimit ?? 100 } as const;
@@ -57,7 +68,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
-    });
+    , ...(agent ? { agent: (parsed => (parsed.protocol === 'http:' ? agent.http : agent.https))(new URL(url)) } : {}) });
     if (debug) {
       try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
     }

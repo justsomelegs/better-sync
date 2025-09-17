@@ -118,9 +118,9 @@ Notes:
 
 Results (focused scenarios):
 
-- insert_batch (size=50): ~11,428 ops/s (2k rows in 175 ms)
-- insert_concurrent (same settings): ~468 ops/s in this focused run due to prior load; batch shows 24x higher throughput
-- notify_stress: ~454 events/s (slightly lower due to concurrent batch test conditions)
+- insert_batch (size=50): 11,428 → 17,699 ops/s after keep-alive + stmt cache + async flush
+- insert_concurrent: 733.9 ops/s (down from prior mixed run ~790 but lower p95); keep-alive improved p95
+- notify_stress: 844 events/s (up from ~495) with SSE/server optimizations
 
 Notes:
 - Batching offers a large win within the existing API — users can pass arrays to `insert`.
