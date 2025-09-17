@@ -73,11 +73,16 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   async function postJson(path: string, body: unknown) {
     const url = `${baseURL}${path}`;
     const started = Date.now();
+    const ac = new AbortController();
+    const timeoutMs = 15000;
+    const t = setTimeout(() => { try { ac.abort(); } catch {} }, timeoutMs);
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal: ac.signal
     });
+    clearTimeout(t);
     if (debug) {
       try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
     }
