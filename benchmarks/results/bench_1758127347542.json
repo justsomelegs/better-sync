@@ -1,0 +1,122 @@
+{
+  "meta": {
+    "rows": 2000,
+    "concurrency": 32,
+    "iterations": 1,
+    "node": "v22.16.0",
+    "date": "2025-09-17T16:41:54.865Z"
+  },
+  "scenarios": {
+    "insert_seq": {
+      "ops": 2000,
+      "elapsedMs": 4385,
+      "latencies": {
+        "count": 2000,
+        "min": 1,
+        "max": 53,
+        "mean": 2.1925,
+        "p50": 2,
+        "p95": 3,
+        "p99": 5
+      },
+      "throughput": 456.1003420752566,
+      "cpu": {
+        "user": 4295027,
+        "system": 674207
+      },
+      "memory": {
+        "rssStart": 76341248,
+        "rssEnd": 187105280,
+        "delta": 110764032
+      }
+    },
+    "insert_concurrent": {
+      "ops": 2000,
+      "elapsedMs": 2585,
+      "latencies": {
+        "count": 2000,
+        "min": 11,
+        "max": 152,
+        "mean": 41.3175,
+        "p50": 41,
+        "p95": 49,
+        "p99": 59
+      },
+      "throughput": 773.6943907156673,
+      "cpu": {
+        "user": 3344514,
+        "system": 837471
+      },
+      "memory": {
+        "rssStart": 187105280,
+        "rssEnd": 244109312,
+        "delta": 57004032
+      }
+    },
+    "select_window": {
+      "ops": 4000,
+      "elapsedMs": 103,
+      "latencies": {
+        "count": 21,
+        "min": 1,
+        "max": 8,
+        "mean": 4.904761904761905,
+        "p50": 5,
+        "p95": 8,
+        "p99": 8
+      },
+      "throughput": 38834.95145631068,
+      "cpu": {
+        "user": 99976,
+        "system": 5132
+      },
+      "memory": {
+        "rssStart": 249843712,
+        "rssEnd": 250384384,
+        "delta": 540672
+      }
+    },
+    "update_conflict": {
+      "ops": 2000,
+      "elapsedMs": 9000,
+      "latencies": {
+        "count": 2000,
+        "min": 40,
+        "max": 694,
+        "mean": 143.7215,
+        "p50": 143,
+        "p95": 153,
+        "p99": 171
+      },
+      "throughput": 222.22222222222223,
+      "outcomes": {
+        "ok": 0,
+        "conflict": 0,
+        "otherErr": 2000
+      },
+      "cpu": {
+        "user": 9595789,
+        "system": 188480
+      },
+      "memory": {
+        "rssStart": 250384384,
+        "rssEnd": 246321152,
+        "delta": -4063232
+      }
+    },
+    "notify_latency": {
+      "ops": 2000,
+      "elapsedMs": 11376,
+      "latencies": {
+        "count": 2000,
+        "min": 2,
+        "max": 17,
+        "mean": 5.688,
+        "p50": 5,
+        "p95": 10,
+        "p99": 12
+      },
+      "throughput": 175.8087201125176
+    }
+  }
+}

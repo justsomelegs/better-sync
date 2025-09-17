@@ -53,3 +53,25 @@ Notes:
 - The large RSS deltas on insert are due to sql.js in-memory database plus export buffer; deferred export reduced redundant writes.
 - Next, target per-op Date.now() calls and diffs emission allocations in `/mutate` path.
 
+## 2025-09-17 — Iteration 2 (Server mutate route micro-opts)
+
+- Changes:
+  - Stamp `updatedAt` once per request (cache `Date.now()`)
+  - Hoist and reuse zod validator per table per request (avoid `.partial()` per row)
+  - Upsert now uses the first `selectByPk` result to compute next version; removed redundant second select
+
+Before vs After (vs Iteration 1):
+
+- insert_seq: 448.7 → 456.1 ops/s (+1.6%); p50 stable at 2ms
+- insert_concurrent: 778.8 → 773.7 ops/s (-0.7% within noise); p95 unchanged
+- select_window: 39.2k → 38.8k ops/s (-1.0% noise)
+- update_conflict: 217.6 → 222.2 ops/s (+2.1%); p50 146ms → 143ms
+- notify_latency: 170.5 → 175.8 (+3.1%); p50 unchanged at 5ms
+
+Trade-offs:
+- None user-visible; API unchanged. Minor code complexity increase for validator hoisting.
+
+Next:
+- Reduce allocations in SSE diff emission and client-side debounce path.
+- Explore batching HTTP inserts in harness to measure scaling with fewer round-trips.
+
