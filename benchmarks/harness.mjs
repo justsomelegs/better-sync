@@ -41,6 +41,29 @@ const iterations = Number(process.env.BENCH_ITER || 1);
 const scenariosEnv = (process.env.BENCH_SCENARIOS || 'insert_seq,insert_concurrent,select_window,update_conflict,notify_latency,notify_stress').split(',').map(s => s.trim()).filter(Boolean);
 const outDir = resolve(process.env.BENCH_OUTPUT_DIR || 'benchmarks/results');
 
+function createProgress(total, label) {
+  let last = -1;
+  const started = Date.now();
+  function fmt(ms) { return `${ms}ms`; }
+  function tick(current) {
+    if (total <= 0) return;
+    const pct = Math.floor((current * 100) / total);
+    if (pct !== last) {
+      last = pct;
+      const elapsed = Date.now() - started;
+      const barLen = 20;
+      const filled = Math.floor((pct / 100) * barLen);
+      const bar = `[${'#'.repeat(filled)}${'.'.repeat(Math.max(0, barLen - filled))}]`;
+      process.stdout.write(`\r${label} ${bar} ${pct}% (${current}/${total}) ${fmt(elapsed)}`);
+    }
+  }
+  function done() {
+    const elapsed = Date.now() - started;
+    process.stdout.write(`\r${label} [####################] 100% (${total}/${total}) ${fmt(elapsed)}\n`);
+  }
+  return { tick, done };
+}
+
 function percentile(values, p) {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
@@ -70,6 +93,7 @@ async function setupServer() {
 
 async function scenarioInsertSeq(client) {
   const lat = [];
+  const prog = createProgress(rows, 'insert_seq');
   const startCpu = process.cpuUsage();
   const rssStart = process.memoryUsage().rss;
   const started = Date.now();
@@ -78,7 +102,9 @@ async function scenarioInsertSeq(client) {
     // eslint-disable-next-line no-await-in-loop
     await client.insert('bench', { id: `seq-${i}`, k: `k${i}`, v: i });
     lat.push(Date.now() - t0);
+    if ((i & 7) === 0 || i + 1 === rows) prog.tick(i + 1);
   }
+  prog.done();
   const elapsedMs = Date.now() - started;
   const cpu = process.cpuUsage(startCpu);
   const rssEnd = process.memoryUsage().rss;
@@ -88,13 +114,15 @@ async function scenarioInsertSeq(client) {
 async function withConcurrency(limit, tasks) {
   const results = [];
   let next = 0; let active = 0;
+  let completed = 0;
+  const prog = createProgress(tasks.length, 'concurrent');
   return new Promise((resolveAll, rejectAll) => {
     const pump = () => {
       if (next >= tasks.length && active === 0) return resolveAll(results);
       while (active < limit && next < tasks.length) {
         const idx = next++;
         active++;
-        tasks[idx]().then((r) => { results[idx] = r; active--; pump(); }).catch((e) => { results[idx] = { error: String(e?.message || e) }; active--; pump(); });
+        tasks[idx]().then((r) => { results[idx] = r; active--; completed++; if ((completed & 15) === 0 || completed === tasks.length) prog.tick(completed); pump(); }).catch((e) => { results[idx] = { error: String(e?.message || e) }; active--; completed++; if ((completed & 15) === 0 || completed === tasks.length) prog.tick(completed); pump(); });
       }
     };
     pump();
