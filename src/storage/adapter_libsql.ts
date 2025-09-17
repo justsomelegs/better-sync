@@ -7,6 +7,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 	let txClient: any | null = null;
 	const ensuredTables = new Set<string>();
 	let metaEnsured = false;
+	let pragmasApplied = false;
 	async function getClient() {
 		try {
 			const mod: any = await import('@libsql/client');
@@ -18,7 +19,8 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 	}
 	async function run(sql: string, params?: any[]) {
 		const c = txClient || await getClient();
-		return c.execute({ sql, args: params || [] });
+		const res = await c.execute({ sql, args: params || [] });
+		return res;
 	}
 	async function ensureMeta() {
 		if (metaEnsured) return;
@@ -41,6 +43,14 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			if (txClient) return;
 			const mod: any = await import('@libsql/client');
 			txClient = mod.createClient({ url: config.url, authToken: (config as any).authToken });
+			if (!pragmasApplied && config.url.startsWith('file:')) {
+				try {
+					await txClient.execute("PRAGMA journal_mode=WAL");
+					await txClient.execute("PRAGMA synchronous=OFF");
+					await txClient.execute("PRAGMA temp_store=MEMORY");
+				} catch {}
+				pragmasApplied = true;
+			}
 			await txClient.execute('BEGIN');
 		},
 		async commit() {

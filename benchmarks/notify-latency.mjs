@@ -59,7 +59,7 @@ const stop = clientB.watch({ table: 'bench_notes', limit: 1 }, (evt) => {
   if (evt && (evt.pks?.length || (Array.isArray(evt.data) && evt.data.length > 0))) {
     if (resolver) resolver();
   }
-}, { initialSnapshot: false, debounceMs: 10 });
+}, { initialSnapshot: false, debounceMs: 5, resyncMode: 'never' });
 
 console.log(`Benchmarking notify latency over ${ITER} iterations (client.watch)...`);
 const bench = new Bench({ iterations: ITER, warmupIterations: 0 });

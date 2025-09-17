@@ -38,3 +38,5 @@ Optimized:
 {"name":"notify-latency","iterations":2000,"elapsedMs":21020,"node":"v22.16.0","adapter":"libsql(file)","p50":5,"p90":7,"p99":9,"avg":5,"ops":95.14747859181732}
 ```
 
+Benchmarking notify latency over 2000 iterations (client.watch)...
+{"name":"notify-latency","iterations":2000,"elapsedMs":17027,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":3,"p90":4,"p99":6,"avg":3,"ops":117.46050390556175}
