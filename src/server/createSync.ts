@@ -109,10 +109,11 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		sse.emit(frame, id, config.sse?.bufferMs ?? 60000, config.sse?.bufferCap ?? 10000);
 	}
 
-	const getEvents = createEndpoint('/events', { method: 'GET' }, async (ctx) => {
+  const getEvents = createEndpoint('/events', { method: 'GET' }, async (ctx) => {
 		const req = (ctx as unknown as { request?: Request }).request;
 		const since = req?.headers.get('Last-Event-ID') ?? (req ? new URL(req.url).searchParams.get('since') : null) ?? undefined;
-		return sse.handler({ bufferMs: config.sse?.bufferMs ?? 60000, cap: config.sse?.bufferCap ?? 10000, lastEventId: since ?? undefined, signal: req?.signal });
+    const enableGzip = req?.headers.get('accept-encoding')?.includes('gzip') ?? false;
+    return sse.handler({ bufferMs: config.sse?.bufferMs ?? 60000, cap: config.sse?.bufferCap ?? 10000, lastEventId: since ?? undefined, signal: req?.signal, gzip: enableGzip });
 	});
 
 	const postMutate = buildPostMutate({ db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit, getContext: config.context });

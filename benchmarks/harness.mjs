@@ -28,6 +28,7 @@ import { Bench } from 'tinybench';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
 import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
+import { libsqlAdapter } from '../dist/adapters/libsql.mjs';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const concurrency = Number(process.env.BENCH_CONCURRENCY || 32);
@@ -281,6 +282,16 @@ async function run() {
       bench.add('notify_latency', async () => { results.scenarios['notify_latency'] = await scenarioNotifyLatency(baseURL); });
     } else if (name === 'notify_stress') {
       bench.add('notify_stress', async () => { results.scenarios['notify_stress'] = await scenarioNotifyStress(baseURL); });
+    } else if (name === 'libsql_insert' && process.env.LIBSQL_URL) {
+      bench.add('libsql_insert', async () => {
+        const adapter = libsqlAdapter({ url: process.env.LIBSQL_URL });
+        await adapter.ensureMeta?.();
+        // seed table
+        for (let i = 0; i < rows; i++) { // eslint-disable-next-line no-await-in-loop
+          await adapter.insert('bench', { id: `ls-${Date.now()}-${i}`, k: `k${i}`, v: i, updatedAt: Date.now(), version: 1 });
+        }
+        results.scenarios['libsql_insert'] = { ok: true };
+      });
     }
   }
 

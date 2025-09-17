@@ -24,9 +24,9 @@ export function createSseStream(config?: SseConfig) {
 	}
 
 	function handler(opts: { bufferMs: number; cap: number; lastEventId?: string; signal?: AbortSignal; debug?: boolean }) {
-		let timer: NodeJS.Timeout | null = null;
-		let send: ((frame: string) => void) | null = null;
-		return new Response(new ReadableStream<Uint8Array>({
+    let timer: NodeJS.Timeout | null = null;
+    let send: ((frame: Uint8Array) => void) | null = null;
+    const stream = new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(KEEPALIVE);
 				if (opts.lastEventId) {
@@ -39,7 +39,7 @@ export function createSseStream(config?: SseConfig) {
 						controller.enqueue(RECOVER);
 					}
 				}
-				send = (frame: Uint8Array) => controller.enqueue(frame);
+        send = (frame: Uint8Array) => controller.enqueue(frame);
 				subscribers.add(send);
 				timer = setInterval(() => controller.enqueue(KEEPALIVE), config?.keepaliveMs ?? 15000);
 				if (opts.signal) {
@@ -54,7 +54,18 @@ export function createSseStream(config?: SseConfig) {
 				if (timer) clearInterval(timer);
 				if (send) subscribers.delete(send);
 			}
-		}), { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' } });
+    });
+    try {
+      const encHeader = (globalThis as any).CompressionStream ? { 'Vary': 'Accept-Encoding' } : {};
+      const gzip = (opts as any).gzip === true && (globalThis as any).CompressionStream;
+      if (gzip) {
+        const cs = new (globalThis as any).CompressionStream('gzip');
+        // @ts-ignore pipeThrough exists on web streams
+        const compressed = (stream as any).pipeThrough(cs);
+        return new Response(compressed as any, { headers: { 'Content-Type': 'text/event-stream', 'Content-Encoding': 'gzip', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no', ...encHeader } });
+      }
+    } catch {}
+    return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' } });
 	}
 
 	return { emit, handler, ring, subscribers } as const;
