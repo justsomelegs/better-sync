@@ -35,24 +35,25 @@ export function buildPostMutate(deps: {
 			let result: unknown;
 			const txId = ulid();
 			if (body.op === 'insert') {
+				const tableSchema = getTableSchema(body.table);
+				const partial = tableSchema ? (tableSchema.partial() as unknown as z.ZodTypeAny) : null;
 				if (Array.isArray(body.rows)) {
 					const out: Record<string, unknown>[] = [];
+					const now = Date.now();
 					for (const r of body.rows) {
-						const tableSchema = getTableSchema(body.table);
-						if (tableSchema) {
-							const parsed = (tableSchema.partial() as unknown as z.ZodTypeAny).safeParse(r);
+						if (partial) {
+							const parsed = partial.safeParse(r);
 							if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 						}
 						const providedId = (r as any).id;
 						const stampedId = chooseStampedId(ulid, providedId);
-						const stamped = { ...r, id: stampedId, [getUpdatedAtField(body.table)]: Date.now(), version: 1 } as Record<string, unknown>;
+						const stamped = { ...r, id: stampedId, [getUpdatedAtField(body.table)]: now, version: 1 } as Record<string, unknown>;
 						out.push(await db.insert(body.table, stamped));
 					}
 					result = { rows: out };
 				} else {
-					const tableSchema = getTableSchema(body.table);
-					if (tableSchema) {
-						const parsed = (tableSchema.partial() as unknown as z.ZodTypeAny).safeParse(body.rows);
+					if (partial) {
+						const parsed = partial.safeParse(body.rows);
 						if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 					}
 					const providedId = (body.rows as any).id;
@@ -64,8 +65,9 @@ export function buildPostMutate(deps: {
 			}
 			if (body.op === 'update') {
 				const tableSchema = getTableSchema(body.table);
-				if (tableSchema) {
-					const parsed = (tableSchema.partial() as unknown as z.ZodTypeAny).safeParse(body.set);
+				const partial = tableSchema ? (tableSchema.partial() as unknown as z.ZodTypeAny) : null;
+				if (partial) {
+					const parsed = partial.safeParse(body.set);
 					if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 				}
 				const existing = await db.selectByPk(body.table, body.pk as PrimaryKey);
@@ -76,18 +78,20 @@ export function buildPostMutate(deps: {
 			if (body.op === 'upsert') {
 				const single = (body as any).row as Record<string, unknown> | undefined;
 				const items = single ? [single] : (Array.isArray((body as any).rows) ? (body as any).rows as Record<string, unknown>[] : [((body as any).rows as Record<string, unknown>)]);
+				const tableSchema = getTableSchema(body.table);
+				const partial = tableSchema ? (tableSchema.partial() as unknown as z.ZodTypeAny) : null;
 				const out: Record<string, unknown>[] = [];
+				const now = Date.now();
 				for (const incoming of items) {
-					const tableSchema = getTableSchema(body.table);
-					if (tableSchema) {
-						const parsed = (tableSchema.partial() as unknown as z.ZodTypeAny).safeParse(incoming);
+					if (partial) {
+						const parsed = partial.safeParse(incoming);
 						if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 					}
 					const providedId = (incoming as any).id;
 					const id = chooseStampedId(ulid, providedId);
 					const existing = await db.selectByPk(body.table, id);
 					if (!existing) {
-						const stamped = { ...incoming, id, [getUpdatedAtField(body.table)]: Date.now(), version: 1 } as Record<string, unknown>;
+						const stamped = { ...incoming, id, [getUpdatedAtField(body.table)]: now, version: 1 } as Record<string, unknown>;
 						out.push(await db.insert(body.table, stamped));
 					} else {
 						const mergeKeys = body.merge;
@@ -95,9 +99,8 @@ export function buildPostMutate(deps: {
 						const keys = mergeKeys ?? Object.keys(incoming).filter((k) => k !== 'id' && k !== 'updatedAt');
 						const set: Record<string, unknown> = {};
 						for (const k of keys) set[k] = incoming[k];
-						const cur = await db.selectByPk(body.table, id);
-						const nextVer = (cur as any)?.version ? Number((cur as any).version) + 1 : 1;
-						out.push(await db.updateByPk(body.table, id, { ...set, [getUpdatedAtField(body.table)]: Date.now(), version: nextVer }));
+						const nextVer = (existing as any)?.version ? Number((existing as any).version) + 1 : 1;
+						out.push(await db.updateByPk(body.table, id, { ...set, [getUpdatedAtField(body.table)]: now, version: nextVer }));
 					}
 				}
 				result = single ? { row: out[0] } : (Array.isArray((body as any).rows) ? { rows: out } : { row: out[0] });
@@ -107,6 +110,7 @@ export function buildPostMutate(deps: {
 				result = res;
 			}
 			await db.commit();
+			// Emit event after commit to ensure visibility with adapters that buffer until COMMIT (e.g., libsql)
 			if (body.op === 'insert' || body.op === 'upsert') {
 				const rows = Array.isArray((result as any).rows) ? (result as any).rows : [(result as any).row];
 				const pks = rows.map((r: any) => r.id);

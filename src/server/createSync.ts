@@ -68,7 +68,7 @@ function chooseStampedId(ulidGen: () => string, provided: unknown): string {
 	return (isValidUlid(provided) || looksLikeCompositeCanonical(provided)) ? String(provided) : ulidGen();
 }
 
-export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number }; autoMigrate?: boolean; context?: (req: Request) => unknown | Promise<unknown> }) {
+export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number; payload?: 'full' | 'minimal'; coalesceMs?: number }; autoMigrate?: boolean; context?: (req: Request) => unknown | Promise<unknown> }) {
 	const db = config.database;
 	const idem: IdempotencyStore = config.idempotencyStore ?? createMemoryIdempotencyStore();
 	let versionCounter = 0;
@@ -102,20 +102,72 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		return parts.join('|');
 	}
 
-	function emit(type: 'mutation', data: Record<string, unknown>) {
-		const id = ulid();
-		const payload = { eventId: id, txId: data['txId'], tables: data['tables'] };
-		const frame = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
-		sse.emit(frame, id, config.sse?.bufferMs ?? 60000, config.sse?.bufferCap ?? 10000);
-	}
+  function emit(type: 'mutation', data: Record<string, unknown>) {
+    const id = ulid();
+    const payloadMode = config.sse?.payload ?? 'full';
+    let tables = data['tables'] as any[];
+    if (payloadMode === 'minimal' && Array.isArray(tables)) {
+      tables = tables.map((t: any) => ({ name: t?.name, pks: t?.pks }));
+    }
+    const frame = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify({ tables })}\n\n`;
+    sse.emit(frame, id, config.sse?.bufferMs ?? 60000, config.sse?.bufferCap ?? 10000);
+  }
 
-	const getEvents = createEndpoint('/events', { method: 'GET' }, async (ctx) => {
+  // Optional coalescing of mutation events into a single SSE frame within a short window
+  let pendingTables: Array<{ name: string; type: string; pks?: any[]; rowVersions?: Record<string, number>; diffs?: Record<string, { set?: Record<string, unknown>; unset?: string[] }> }> | null = null;
+  let coalesceTimer: NodeJS.Timeout | null = null;
+  function mergeTables(base: NonNullable<typeof pendingTables>, incoming: NonNullable<typeof pendingTables>): NonNullable<typeof pendingTables> {
+    const byName = new Map<string, any>();
+    for (const t of base) byName.set(t.name, { ...t, pks: Array.isArray(t.pks) ? [...t.pks] : [], rowVersions: { ...(t.rowVersions || {}) }, diffs: { ...(t.diffs || {}) } });
+    for (const t of incoming) {
+      const cur = byName.get(t.name) || { name: t.name, type: t.type, pks: [], rowVersions: {}, diffs: {} };
+      if (Array.isArray(t.pks)) {
+        const s = new Set<string | number | object>(cur.pks);
+        for (const p of t.pks) s.add(p);
+        cur.pks = Array.from(s);
+      }
+      if (t.rowVersions) {
+        for (const [rid, ver] of Object.entries(t.rowVersions)) {
+          const prev = (cur.rowVersions as any)[rid];
+          (cur.rowVersions as any)[rid] = typeof prev === 'number' ? Math.max(prev, ver as number) : (ver as number);
+        }
+      }
+      if (t.diffs) {
+        for (const [rid, diff] of Object.entries(t.diffs)) {
+          const existing = (cur.diffs as any)[rid] || {};
+          const out: any = { ...existing };
+          if (diff.set) out.set = { ...(existing.set || {}), ...(diff.set || {}) };
+          if (Array.isArray(diff.unset)) out.unset = Array.from(new Set([...(existing.unset || []), ...diff.unset]));
+          (cur.diffs as any)[rid] = out;
+        }
+      }
+      byName.set(t.name, cur);
+    }
+    return Array.from(byName.values());
+  }
+
+  const coalesceMs = Math.max(0, Number(config.sse?.coalesceMs ?? 0));
+  const sendMutation = (data: Record<string, unknown>) => {
+    if (coalesceMs <= 0) return emit('mutation', data);
+    const incoming = (data['tables'] as any[]) || [];
+    pendingTables = pendingTables ? mergeTables(pendingTables, incoming) : [...incoming];
+    if (!coalesceTimer) {
+      coalesceTimer = setTimeout(() => {
+        const tables = pendingTables || [];
+        pendingTables = null;
+        coalesceTimer = null;
+        emit('mutation', { tables });
+      }, coalesceMs);
+    }
+  };
+
+  const getEvents = createEndpoint('/events', { method: 'GET' }, async (ctx) => {
 		const req = (ctx as unknown as { request?: Request }).request;
 		const since = req?.headers.get('Last-Event-ID') ?? (req ? new URL(req.url).searchParams.get('since') : null) ?? undefined;
 		return sse.handler({ bufferMs: config.sse?.bufferMs ?? 60000, cap: config.sse?.bufferCap ?? 10000, lastEventId: since ?? undefined, signal: req?.signal });
 	});
 
-	const postMutate = buildPostMutate({ db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit, getContext: config.context });
+  const postMutate = buildPostMutate({ db, mutateSchema, getTableSchema, getUpdatedAtField, ulid, idem, emit: (_t, data) => sendMutation(data), getContext: config.context });
 	const postSelect = buildPostSelect(db, selectSchema);
 	const postMutator = buildPostMutator(db, config.mutators, ulid, idem, config.context);
 

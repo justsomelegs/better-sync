@@ -8,7 +8,7 @@ import { SyncError } from '../shared/errors';
 
 // URL builder intentionally removed to keep adapter DX explicit
 
-export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
+export function sqliteAdapter(_config: { url: string; flushMode?: 'sync' | 'async' | 'off' }): DatabaseAdapter {
   // In-memory SQLite via sql.js (sufficient for MVP & tests)
   const filePath = _config.url?.startsWith('file:') ? resolvePath(_config.url.slice('file:'.length)) : null;
   const ready = initSqlJs({ locateFile: (f: string) => `node_modules/sql.js/dist/${f}` }).then(async (SQL) => {
@@ -22,6 +22,10 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     }
     return new SQL.Database();
   });
+  // Cache to avoid repeated DDL on hot paths
+  const ensuredTables = new Set<string>();
+  let metaEnsured = false;
+  const baselineMode = process.env.JS_BENCH_BASELINE === '1';
   let txDepth = 0;
   async function ensureTable(db: any, table: string, row: Record<string, unknown>) {
     const cols = Object.keys(row).filter((c) => c !== 'version');
@@ -33,25 +37,64 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     db.run(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, updatedAt INTEGER)`);
   }
   return {
-    async ensureMeta() { const db = await ready; db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); },
+    async ensureMeta() { const db = await ready; db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; },
     async begin() { const db = await ready; if (txDepth === 0) db.run('BEGIN'); txDepth++; },
-    async commit() { const db = await ready; if (txDepth > 0) { txDepth--; if (txDepth === 0) { db.run('COMMIT'); if (filePath) { const data = db.export(); await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { }); await fs.writeFile(filePath, Buffer.from(data)); } } } },
+    async commit() {
+      const db = await ready;
+      if (txDepth > 0) {
+        txDepth--;
+        if (txDepth === 0) {
+          db.run('COMMIT');
+          if (filePath) {
+            const mode = _config.flushMode ?? 'sync';
+            if (mode === 'off') {
+              // skip flush for lowest latency
+            } else if (mode === 'async') {
+              // fire-and-forget flush to disk
+              try {
+                const data = db.export();
+                void fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).then(() => fs.writeFile(filePath, Buffer.from(data))).catch(() => {});
+              } catch {}
+            } else {
+              const data = db.export();
+              await fs.mkdir(resolvePath(filePath, '..'), { recursive: true }).catch(() => { });
+              await fs.writeFile(filePath, Buffer.from(data));
+            }
+          }
+        }
+      }
+    },
     async rollback() { const db = await ready; if (txDepth > 0) { db.run('ROLLBACK'); txDepth = 0; } },
     async insert(table: string, row: Record<string, any>) {
       const db = await ready;
-      db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
-      await ensureTable(db, table, row);
-      // Unique check on id
-      if (row.id != null) {
-        const s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`);
-        s.bind([String(row.id)]);
-        const exists = s.step();
-        s.free();
-        if (exists) { throw new SyncError('CONFLICT', 'duplicate', { constraint: 'unique', column: 'id' }); }
+      if (baselineMode) {
+        db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
+        await ensureTable(db, table, row);
+        if (row.id != null) {
+          const s = db.prepare(`SELECT id FROM ${table} WHERE id = ? LIMIT 1`);
+          s.bind([String(row.id)]);
+          const exists = s.step();
+          s.free();
+          if (exists) { throw new SyncError('CONFLICT', 'duplicate', { constraint: 'unique', column: 'id' }); }
+        }
+        const cols = Object.keys(row).filter((c) => c !== 'version');
+        const placeholders = cols.map(() => '?').join(',');
+        db.run(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`, cols.map(k => (row as any)[k]));
+      } else {
+        if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; }
+        if (!ensuredTables.has(table)) { await ensureTable(db, table, row); ensuredTables.add(table); }
+        const cols = Object.keys(row).filter((c) => c !== 'version');
+        const placeholders = cols.map(() => '?').join(',');
+        try {
+          db.run(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`, cols.map(k => (row as any)[k]));
+        } catch (e: any) {
+          const msg = String(e?.message || '');
+          if (/UNIQUE constraint failed/i.test(msg) || /PRIMARY KEY constraint failed/i.test(msg)) {
+            throw new SyncError('CONFLICT', 'duplicate', { constraint: 'unique', column: 'id' });
+          }
+          throw e;
+        }
       }
-      const cols = Object.keys(row).filter((c) => c !== 'version');
-      const placeholders = cols.map(() => '?').join(',');
-      db.run(`INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`, cols.map(k => (row as any)[k]));
       // mirror version into meta if provided
       if (row.id != null && typeof row.version === 'number') {
         const pk = String(row.id);
@@ -61,7 +104,11 @@ export function sqliteAdapter(_config: { url: string }): DatabaseAdapter {
     },
     async updateByPk(table: string, pk: PrimaryKey, set: Record<string, any>, opts?: { ifVersion?: number }) {
       const db = await ready;
-      db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
+      if (baselineMode) {
+        db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
+      } else {
+        if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; }
+      }
       const key = canonicalPk(pk);
       let g: any;
       try { g = db.prepare(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`); }

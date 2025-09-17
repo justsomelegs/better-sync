@@ -22,13 +22,17 @@ import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
 import { createSync, createClient } from '../dist/index.mjs';
-import { sqliteAdapter } from '../dist/server.mjs';
+import { sqliteAdapter, libsqlAdapter } from '../dist/index.mjs';
 import { Bench } from 'tinybench';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_server_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
-const db = sqliteAdapter({ url: dbUrl });
+const JSON_MODE = process.env.BENCH_JSON === '1';
+const useLibsql = process.env.BENCH_ADAPTER === 'libsql';
+const db = useLibsql
+  ? libsqlAdapter({ url: process.env.LIBSQL_URL || `file:${dbFile}` })
+  : sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 const schema = { bench_items: { schema: z.object({ id: z.string().optional(), name: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
 const sync = createSync({ schema, database: db, autoMigrate: true });
@@ -49,7 +53,14 @@ bench.add('client-insert-e2e', async () => {
     await client.insert('bench_items', { id: `s${runId}-${i}`, name: `n${runId}-${i}` });
   }
 });
+const t0 = Date.now();
 await bench.run();
-console.table(bench.table());
+const elapsedMs = Date.now() - t0;
+if (JSON_MODE) {
+  const out = { name: 'client-insert-e2e', rows, elapsedMs, ops: rows / (elapsedMs / 1000), node: process.version, adapter: 'sqlite(sql.js)' };
+  console.log(JSON.stringify(out));
+} else {
+  console.table(bench.table());
+}
 await new Promise((r) => server.close(() => r()))
 

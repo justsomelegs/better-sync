@@ -18,11 +18,11 @@ import type { ClientMutators, MutatorsSpec, ServerMutatorsSpec, ClientMutatorsFr
 type WatchArgs = string | { table: string; where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number };
 type WatchEvent = { table: string; pks?: (string | number | Record<string, unknown>)[]; rowVersions?: Record<string, number>; data?: any[]; error?: { code: string; message: string } };
 
-type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number };
+type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number; resyncMode?: 'debounced' | 'never' };
 
 type RealtimeMode = 'sse' | 'poll' | 'off';
 
-export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
+export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; dispatcher?: any; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
@@ -30,6 +30,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   const defaults = { debounceMs: config.defaults?.debounceMs ?? 20, pageLimit: config.defaults?.pageLimit ?? 100 } as const;
   const hooks = { onError: config.hooks?.onError, onRetry: config.hooks?.onRetry } as const;
   const debug = !!config.debug;
+  const dispatcher = (config as any).dispatcher;
   const baseBackoffMs = config.reconnectBackoff?.baseMs ?? 500;
   const maxBackoffMs = config.reconnectBackoff?.maxMs ?? 5000;
   const jitterMs = config.reconnectBackoff?.jitterMs ?? 250;
@@ -39,7 +40,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
 
   // per-table cache and watchers with options
   const cache = new Map<string, Map<string, any>>();
-  const watchers = new Map<string, Set<{ fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number }; status: 'connecting'|'live'|'retrying'; error?: Error; lastData?: any[]; pollTimer?: any }>>();
+  type WatcherEntry = { fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number }; status: 'connecting'|'live'|'retrying'; error?: Error; lastData?: any[]; pollTimer?: any };
+  const watchers = new Map<string, Set<WatcherEntry>>();
   function getTable(table: string) {
     let t = cache.get(table);
     if (!t) { t = new Map(); cache.set(table, t); }
@@ -56,7 +58,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      ...(dispatcher ? { dispatcher } : {})
     });
     if (debug) {
       try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
@@ -98,7 +101,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       if (!args.cursor) {
         const t = getTable(args.table);
         for (const row of json.data) t.set(String(row.id), row);
-        if (ds) await ds.apply(json.data.map((r: any) => ({ table: args.table, type: 'insert', row: r })));
+      if (ds != null) await (ds as LocalStore).apply(json.data.map((r: any) => ({ table: args.table, type: 'insert', row: r })));
       }
       return json;
     }
@@ -110,7 +113,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     let cursor: string | null | undefined = args.cursor ?? undefined;
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const win = ds
+      const win: any = ds
         ? await ds.readWindow(args.table, { limit: pageSize, orderBy, cursor: cursor ?? null })
         : await postJson('/select', { table: args.table, select: args.select, orderBy, limit: pageSize, cursor }).then(r => r.json());
       const rows = (win as any).data as any[];
@@ -257,7 +260,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   let sseRunning = false;
   let lastEventId: string | null = null;
   const seenEventIds = new Set<string>();
-  const maxSeen = 5000;
+  const maxSeen = 1024;
   const tableDebounce = new Map<string, any>();
   let retryAttempt = 0;
 
@@ -270,7 +273,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       const headers: Record<string, string> = {};
       if (lastEventId) headers['Last-Event-ID'] = lastEventId;
       if (debug) { try { console.debug('[just-sync] SSE connect', { lastEventId }); } catch {} }
-      const res = await fetchImpl(`${baseURL}/events`, { signal: sseAC.signal, headers });
+      const res = await fetchImpl(`${baseURL}/events`, { signal: sseAC.signal, headers, ...(dispatcher ? { dispatcher } : {}) });
       if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
       retryAttempt = 0;
       if (debug) { try { console.debug('[just-sync] SSE connected'); } catch {} }
@@ -281,37 +284,44 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
         const { value, done } = await reader.read();
         if (done) break;
         if (!value) continue;
-        buffer += td.decode(value);
-        const frames = buffer.split('\n\n');
-        buffer = frames.pop() || '';
-        for (const f of frames) {
-          if (f.startsWith(':')) continue; // keepalive
-          const idLine = f.split('\n').find((l) => l.startsWith('id: '));
-          if (idLine) {
-            const eid = idLine.slice(4).trim();
-            lastEventId = eid;
-            if (seenEventIds.has(eid)) continue;
-            seenEventIds.add(eid);
-            if (seenEventIds.size > maxSeen) {
-              // prune oldest half by recreating set (iteration order is insertion order for Set)
-              const keep = Math.floor(maxSeen / 2);
-              const next = new Set<string>();
-              let i = 0;
-              for (const v of seenEventIds) { if (i++ >= keep) break; next.add(v); }
-              seenEventIds.clear();
-              for (const v of next) seenEventIds.add(v);
+        buffer += td.decode(value, { stream: true });
+        // Fast scan for frame separators without splitting full string into array
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) !== -1) {
+          const f = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          if (f.length === 0 || f.charCodeAt(0) === 58 /* ':' keepalive */) continue;
+          // Extract id
+          let idStart = f.indexOf('id: ');
+          if (idStart !== -1) {
+            const nl = f.indexOf('\n', idStart);
+            const eid = f.slice(idStart + 4, nl === -1 ? undefined : nl).trim();
+            if (eid) {
+              lastEventId = eid;
+              if (seenEventIds.has(eid)) continue;
+              seenEventIds.add(eid);
+              if (seenEventIds.size > maxSeen) {
+                const keep = Math.floor(maxSeen / 2);
+                const next = new Set<string>();
+                let i = 0;
+                for (const v of seenEventIds) { if (i++ >= keep) break; next.add(v); }
+                seenEventIds.clear();
+                for (const v of next) seenEventIds.add(v);
+              }
             }
           }
-          if (f.includes('event: mutation')) {
-            const dataLine = f.split('\n').find((l) => l.startsWith('data: '));
-            if (!dataLine) continue;
-            let payload: any = {};
-            try { payload = JSON.parse(dataLine.slice(6)); } catch { }
+          // Process mutation event quickly
+          if (f.indexOf('event: mutation') !== -1) {
+            const dataStart = f.indexOf('data: ');
+            if (dataStart === -1) continue;
+            const nl2 = f.indexOf('\n', dataStart);
+            const jsonStr = f.slice(dataStart + 6, nl2 === -1 ? undefined : nl2);
+            let payload: any = null;
+            try { payload = JSON.parse(jsonStr); } catch { continue; }
             const tables = Array.isArray(payload.tables) ? payload.tables : [];
             for (const t of tables) {
               const tableName = t?.name as string;
               if (!tableName || !watchers.has(tableName)) continue;
-              // Try apply diffs immediately when provided
               const diffs = (t && t.diffs) || null;
               if (diffs && typeof diffs === 'object') {
                 const tableCache = getTable(tableName);
@@ -326,17 +336,19 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
                 }
                 notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
               } else {
-                // no diffs: notify and debounce snapshot
                 notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
               }
-              // debounce snapshot per table: run per watcher with its args
               if (tableDebounce.get(tableName)) continue;
-              const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? defaults.debounceMs;
+              const subsForTable = watchers.get(tableName) || new Set();
+              const allNever = Array.from(subsForTable).every((e: any) => (e.opts?.resyncMode ?? 'debounced') === 'never');
+              if (allNever) continue;
+              const delay =  (Array.from(subsForTable)[0]?.opts?.debounceMs) ?? defaults.debounceMs;
               tableDebounce.set(tableName, setTimeout(async () => {
                 tableDebounce.delete(tableName);
                 const subs = watchers.get(tableName);
                 if (!subs || subs.size === 0) return;
                 for (const entry of subs) {
+                  if ((entry as any).opts?.resyncMode === 'never') continue;
                   try {
                     const res = await select({ table: tableName, where: entry.args.where, select: entry.args.select, orderBy: entry.args.orderBy, limit: entry.args.limit });
                     entry.lastData = res.data;
@@ -379,7 +391,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     const tableName = typeof table === 'string' ? table : table.table;
     let set = watchers.get(tableName);
     if (!set) { set = new Set(); watchers.set(tableName, set); }
-    const entry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit }, status: 'connecting' as const };
+    const entry: WatcherEntry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit }, status: 'connecting' } as WatcherEntry;
     set.add(entry);
 
     // initial snapshot (default true)

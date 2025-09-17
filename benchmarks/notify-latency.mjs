@@ -21,26 +21,31 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
-import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
+import { createSync, createClient, sqliteAdapter, libsqlAdapter } from '../dist/index.mjs';
 import { Bench } from 'tinybench';
 
 const ITER = Number(process.env.BENCH_NOTIFY_ITER || 2000);
 const TIMEOUT_MS = Number(process.env.BENCH_NOTIFY_TIMEOUT || 5000);
 const dbFile = join(tmpdir(), `bench_notify_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
+const JSON_MODE = process.env.BENCH_JSON === '1';
 
-const db = sqliteAdapter({ url: dbUrl });
+const useLibsql = process.env.BENCH_ADAPTER === 'libsql';
+const db = useLibsql
+  ? libsqlAdapter({ url: process.env.LIBSQL_URL || `file:${dbFile}` })
+  : sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 const schema = { bench_notes: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
-const sync = createSync({ schema, database: db, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000 } });
+const noIdem = process.env.BENCH_NO_IDEM === '1' ? { has: async () => false, get: async () => undefined, set: async () => {} } : undefined;
+const sync = createSync({ schema, database: db, idempotencyStore: noIdem, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000, payload: process.env.BENCH_SSE_PAYLOAD === 'minimal' ? 'minimal' : 'full', coalesceMs: Number(process.env.BENCH_COALESCE_MS || 0) } });
 const server = http.createServer(toNodeHandler(sync.handler));
 await new Promise((r) => server.listen(0, r));
 const addr = server.address();
 if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('no port');
 const baseURL = `http://127.0.0.1:${addr.port}`;
 
-const clientA = createClient({ baseURL, realtime: 'sse' });
-const clientB = createClient({ baseURL, realtime: 'sse' });
+const clientA = createClient({ baseURL, realtime: 'sse', debug: process.env.BENCH_DEBUG === '1' });
+const clientB = createClient({ baseURL, realtime: 'sse', debug: process.env.BENCH_DEBUG === '1' });
 
 // Prime: initial snapshot and one seed insert
 await clientA.insert('bench_notes', { title: 'seed' }).catch(() => {});
@@ -55,12 +60,13 @@ const stop = clientB.watch({ table: 'bench_notes', limit: 1 }, (evt) => {
   if (evt && (evt.pks?.length || (Array.isArray(evt.data) && evt.data.length > 0))) {
     if (resolver) resolver();
   }
-}, { initialSnapshot: false, debounceMs: 10 });
+}, { initialSnapshot: false, debounceMs: 5, resyncMode: 'never' });
 
 console.log(`Benchmarking notify latency over ${ITER} iterations (client.watch)...`);
 const bench = new Bench({ iterations: ITER, warmupIterations: 0 });
 bench.add('notify-latency', async () => {
-  await new Promise((r) => setTimeout(r, 5));
+  const wait = Number(process.env.BENCH_NOTIFY_WAIT_MS || 0);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   const start = Date.now();
   const p = new Promise((res, rej) => {
     resolver = res;
@@ -76,9 +82,26 @@ bench.add('notify-latency', async () => {
     resolver = null;
   }
 });
+const t0 = Date.now();
 await bench.run();
 stop();
-console.table(bench.table());
+const elapsedMs = Date.now() - t0;
+if (JSON_MODE) {
+  const summary = latencies.length > 0 ? {
+    p50: percentile(latencies, 50),
+    p90: percentile(latencies, 90),
+    p99: percentile(latencies, 99),
+    avg: average(latencies),
+    ops: latencies.length / (elapsedMs / 1000)
+  } : { p50: null, p90: null, p99: null, avg: null, ops: null };
+  const out = { name: 'notify-latency', iterations: ITER, elapsedMs, node: process.version, adapter: 'sqlite(sql.js)', ...summary };
+  console.log(JSON.stringify(out));
+} else {
+  console.table(bench.table());
+}
 
 await new Promise((r) => server.close(() => r()));
+
+function percentile(arr, p) { if (arr.length === 0) return null; const sorted = [...arr].sort((a,b)=>a-b); const idx = Math.floor((p/100) * (sorted.length - 1)); return sorted[idx]; }
+function average(arr) { if (arr.length === 0) return null; return Math.round(arr.reduce((a,b)=>a+b,0)/arr.length); }
 
