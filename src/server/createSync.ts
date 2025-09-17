@@ -68,7 +68,7 @@ function chooseStampedId(ulidGen: () => string, provided: unknown): string {
 	return (isValidUlid(provided) || looksLikeCompositeCanonical(provided)) ? String(provided) : ulidGen();
 }
 
-export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number }; autoMigrate?: boolean; context?: (req: Request) => unknown | Promise<unknown> }) {
+export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { schema: unknown; database: DatabaseAdapter; mutators?: TMutators; idempotencyStore?: IdempotencyStore; sse?: { keepaliveMs?: number; bufferMs?: number; bufferCap?: number; payload?: 'full' | 'minimal' }; autoMigrate?: boolean; context?: (req: Request) => unknown | Promise<unknown> }) {
 	const db = config.database;
 	const idem: IdempotencyStore = config.idempotencyStore ?? createMemoryIdempotencyStore();
 	let versionCounter = 0;
@@ -102,12 +102,16 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 		return parts.join('|');
 	}
 
-	function emit(type: 'mutation', data: Record<string, unknown>) {
-		const id = ulid();
-		const payload = { eventId: id, txId: data['txId'], tables: data['tables'] };
-		const frame = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
-		sse.emit(frame, id, config.sse?.bufferMs ?? 60000, config.sse?.bufferCap ?? 10000);
-	}
+  function emit(type: 'mutation', data: Record<string, unknown>) {
+    const id = ulid();
+    const payloadMode = config.sse?.payload ?? 'full';
+    let tables = data['tables'] as any[];
+    if (payloadMode === 'minimal' && Array.isArray(tables)) {
+      tables = tables.map((t: any) => ({ name: t?.name, pks: t?.pks }));
+    }
+    const frame = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify({ eventId: id, txId: data['txId'], tables })}\n\n`;
+    sse.emit(frame, id, config.sse?.bufferMs ?? 60000, config.sse?.bufferCap ?? 10000);
+  }
 
 	const getEvents = createEndpoint('/events', { method: 'GET' }, async (ctx) => {
 		const req = (ctx as unknown as { request?: Request }).request;

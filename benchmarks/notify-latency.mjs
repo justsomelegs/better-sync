@@ -33,7 +33,7 @@ const JSON_MODE = process.env.BENCH_JSON === '1';
 const db = sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 const schema = { bench_notes: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
-const sync = createSync({ schema, database: db, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000 } });
+const sync = createSync({ schema, database: db, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000, payload: process.env.BENCH_SSE_PAYLOAD === 'minimal' ? 'minimal' : 'full' } });
 const server = http.createServer(toNodeHandler(sync.handler));
 await new Promise((r) => server.listen(0, r));
 const addr = server.address();

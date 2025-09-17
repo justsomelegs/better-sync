@@ -46,6 +46,7 @@ Notes:
 {"name":"notify-latency","iterations":2000,"elapsedMs":15861,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":3,"p90":4,"p99":5,"avg":3,"ops":126.09545425887396}
 {"name":"notify-latency","iterations":2000,"elapsedMs":13444,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":1,"p90":2,"p99":3,"avg":1,"ops":148.76524843796489}
 {"name":"notify-latency","iterations":2000,"elapsedMs":13463,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":1,"p90":2,"p99":4,"avg":1,"ops":148.55529971031717}
+{"name":"notify-latency","iterations":2000,"elapsedMs":13460,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":1,"p90":2,"p99":4,"avg":1,"ops":148.58841010401187}
 ```
 
 Notes:
@@ -81,3 +82,5 @@ Benchmarking notify latency over 2000 iterations (client.watch)...
 {"name":"notify-latency","iterations":2000,"elapsedMs":13444,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":1,"p90":2,"p99":3,"avg":1,"ops":148.76524843796489}
 Benchmarking notify latency over 2000 iterations (client.watch)...
 {"name":"notify-latency","iterations":2000,"elapsedMs":13463,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":1,"p90":2,"p99":4,"avg":1,"ops":148.55529971031717}
+Benchmarking notify latency over 2000 iterations (client.watch)...
+{"name":"notify-latency","iterations":2000,"elapsedMs":13460,"node":"v22.16.0","adapter":"sqlite(sql.js)","p50":1,"p90":2,"p99":4,"avg":1,"ops":148.58841010401187}
