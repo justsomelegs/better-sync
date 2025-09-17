@@ -28,6 +28,7 @@ import { Bench } from 'tinybench';
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_server_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
+const JSON_MODE = process.env.BENCH_JSON === '1';
 const db = sqliteAdapter({ url: dbUrl });
 const schema = { bench_items: { schema: z.object({ id: z.string().optional(), name: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
@@ -49,7 +50,14 @@ bench.add('client-insert-e2e', async () => {
     await client.insert('bench_items', { id: `s${runId}-${i}`, name: `n${runId}-${i}` });
   }
 });
+const t0 = Date.now();
 await bench.run();
-console.table(bench.table());
+const elapsedMs = Date.now() - t0;
+if (JSON_MODE) {
+  const out = { name: 'client-insert-e2e', rows, elapsedMs, node: process.version, adapter: 'sqlite(sql.js)' };
+  console.log(JSON.stringify(out));
+} else {
+  console.table(bench.table());
+}
 await new Promise((r) => server.close(() => r()))
 

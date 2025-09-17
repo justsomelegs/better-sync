@@ -28,6 +28,7 @@ const ITER = Number(process.env.BENCH_NOTIFY_ITER || 2000);
 const TIMEOUT_MS = Number(process.env.BENCH_NOTIFY_TIMEOUT || 5000);
 const dbFile = join(tmpdir(), `bench_notify_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
+const JSON_MODE = process.env.BENCH_JSON === '1';
 
 const db = sqliteAdapter({ url: dbUrl });
 const schema = { bench_notes: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
@@ -76,9 +77,25 @@ bench.add('notify-latency', async () => {
     resolver = null;
   }
 });
+const t0 = Date.now();
 await bench.run();
 stop();
-console.table(bench.table());
+const elapsedMs = Date.now() - t0;
+if (JSON_MODE) {
+  const summary = latencies.length > 0 ? {
+    p50: percentile(latencies, 50),
+    p90: percentile(latencies, 90),
+    p99: percentile(latencies, 99),
+    avg: average(latencies)
+  } : { p50: null, p90: null, p99: null, avg: null };
+  const out = { name: 'notify-latency', iterations: ITER, elapsedMs, node: process.version, adapter: 'sqlite(sql.js)', ...summary };
+  console.log(JSON.stringify(out));
+} else {
+  console.table(bench.table());
+}
 
 await new Promise((r) => server.close(() => r()));
+
+function percentile(arr, p) { if (arr.length === 0) return null; const sorted = [...arr].sort((a,b)=>a-b); const idx = Math.floor((p/100) * (sorted.length - 1)); return sorted[idx]; }
+function average(arr) { if (arr.length === 0) return null; return Math.round(arr.reduce((a,b)=>a+b,0)/arr.length); }
 
