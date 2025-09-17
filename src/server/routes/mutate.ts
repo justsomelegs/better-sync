@@ -110,6 +110,7 @@ export function buildPostMutate(deps: {
 				result = res;
 			}
 			await db.commit();
+			// Emit event after commit to ensure visibility with adapters that buffer until COMMIT (e.g., libsql)
 			if (body.op === 'insert' || body.op === 'upsert') {
 				const rows = Array.isArray((result as any).rows) ? (result as any).rows : [(result as any).row];
 				const pks = rows.map((r: any) => r.id);

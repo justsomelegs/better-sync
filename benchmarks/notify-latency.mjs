@@ -43,8 +43,8 @@ const addr = server.address();
 if (typeof addr !== 'object' || !addr || !('port' in addr)) throw new Error('no port');
 const baseURL = `http://127.0.0.1:${addr.port}`;
 
-const clientA = createClient({ baseURL, realtime: 'sse' });
-const clientB = createClient({ baseURL, realtime: 'sse' });
+const clientA = createClient({ baseURL, realtime: 'sse', debug: process.env.BENCH_DEBUG === '1' });
+const clientB = createClient({ baseURL, realtime: 'sse', debug: process.env.BENCH_DEBUG === '1' });
 
 // Prime: initial snapshot and one seed insert
 await clientA.insert('bench_notes', { title: 'seed' }).catch(() => {});
