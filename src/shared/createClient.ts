@@ -25,15 +25,25 @@ type RealtimeMode = 'sse' | 'poll' | 'off';
 export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
-  // Node: per-origin undici Pool for strong keep-alive/pooling without user config
-  let dispatcher: any = undefined;
+  // Node: set a global undici dispatcher (Agent with per-origin pools) to enforce keep-alive without user config
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const undici = require('undici');
-    const origin = new URL(baseURL).origin;
-    const Pool = undici.Pool || undici.Agent; // Pool in newer undici, Agent in older
-    // High connections for local benches; pipelining conservative for safety
-    dispatcher = new Pool(origin, { connections: 256, pipelining: 1, keepAliveTimeout: 60_000 });
+    if (!(globalThis as any).__just_sync_undici_global__) {
+      const Agent = undici.Agent;
+      const agent = new Agent({
+        keepAliveTimeout: 60_000,
+        keepAliveMaxTimeout: 60_000,
+        connections: 256,
+        // For each origin, create a Pool with our settings
+        factory(origin: string, opts: any) {
+          const Pool = undici.Pool;
+          return new Pool(origin, { connections: 256, pipelining: 1, keepAliveTimeout: 60_000, ...opts });
+        }
+      });
+      if (typeof undici.setGlobalDispatcher === 'function') undici.setGlobalDispatcher(agent);
+      (globalThis as any).__just_sync_undici_global__ = true;
+    }
   } catch {}
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
   const pollIntervalMs = config.pollIntervalMs ?? 1500;
@@ -67,7 +77,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
-    , ...(dispatcher ? { dispatcher } : {}) });
+    });
     if (debug) {
       try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
     }
