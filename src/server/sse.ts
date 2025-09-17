@@ -1,8 +1,11 @@
 export type SseConfig = { keepaliveMs?: number };
 
 export function createSseStream(config?: SseConfig) {
-	const subscribers = new Set<(frame: string) => void>();
-	const ring: { id: string; frame: string; ts: number }[] = [];
+	const encoder = new TextEncoder();
+	const KEEPALIVE = encoder.encode(':keepalive\n\n');
+	const RECOVER = encoder.encode('event: recover\ndata: {}\n\n');
+	const subscribers = new Set<(frame: Uint8Array) => void>();
+	const ring: { id: string; frame: Uint8Array; ts: number }[] = [];
 
 	function pruneRing(now: number, bufferMs: number, cap: number) {
 		while (ring.length > 0) {
@@ -14,11 +17,10 @@ export function createSseStream(config?: SseConfig) {
 	}
 
 	function emit(frame: string, id: string, bufferMs: number, cap: number) {
-		ring.push({ id, frame, ts: Date.now() });
+		const bytes = encoder.encode(frame);
+		ring.push({ id, frame: bytes, ts: Date.now() });
 		pruneRing(Date.now(), bufferMs, cap);
-		for (const send of subscribers) {
-			try { send(frame); } catch { }
-		}
+		for (const send of subscribers) { try { send(bytes); } catch { } }
 	}
 
 	function handler(opts: { bufferMs: number; cap: number; lastEventId?: string; signal?: AbortSignal; debug?: boolean }) {
@@ -26,21 +28,20 @@ export function createSseStream(config?: SseConfig) {
 		let send: ((frame: string) => void) | null = null;
 		return new Response(new ReadableStream<Uint8Array>({
 			start(controller) {
-				const encoder = new TextEncoder();
-				controller.enqueue(encoder.encode(':keepalive\n\n'));
+				controller.enqueue(KEEPALIVE);
 				if (opts.lastEventId) {
 					const idx = ring.findIndex((e) => e.id === opts.lastEventId);
 					if (idx >= 0) {
-						for (const e of ring.slice(idx + 1)) controller.enqueue(encoder.encode(e.frame));
+						for (const e of ring.slice(idx + 1)) controller.enqueue(e.frame);
 						if (opts.debug) { try { console.debug('[just-sync] SSE replay', ring.length - (idx + 1)); } catch {} }
 					} else {
 						// Signal resume miss so clients can perform a fresh snapshot
-						controller.enqueue(encoder.encode('event: recover\ndata: {}\n\n'));
+						controller.enqueue(RECOVER);
 					}
 				}
-				send = (frame: string) => controller.enqueue(encoder.encode(frame));
+				send = (frame: Uint8Array) => controller.enqueue(frame);
 				subscribers.add(send);
-				timer = setInterval(() => controller.enqueue(encoder.encode(':keepalive\n\n')), config?.keepaliveMs ?? 15000);
+				timer = setInterval(() => controller.enqueue(KEEPALIVE), config?.keepaliveMs ?? 15000);
 				if (opts.signal) {
 					opts.signal.addEventListener('abort', () => {
 						if (timer) clearInterval(timer);

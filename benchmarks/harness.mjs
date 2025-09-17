@@ -7,6 +7,7 @@
  * - update_conflict: concurrent updates with ifVersion to trigger conflicts
  * - select_window: paginated reads until exhaustion
  * - notify_latency: watcher latency distribution
+ * - notify_stress: high-volume mutation notifications throughput
  *
  * Metrics per scenario:
  * - throughput: ops/sec
@@ -30,7 +31,7 @@ import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const concurrency = Number(process.env.BENCH_CONCURRENCY || 32);
 const iterations = Number(process.env.BENCH_ITER || 1);
-const scenariosEnv = (process.env.BENCH_SCENARIOS || 'insert_seq,insert_concurrent,select_window,update_conflict,notify_latency').split(',').map(s => s.trim()).filter(Boolean);
+const scenariosEnv = (process.env.BENCH_SCENARIOS || 'insert_seq,insert_concurrent,select_window,update_conflict,notify_latency,notify_stress').split(',').map(s => s.trim()).filter(Boolean);
 const outDir = resolve(process.env.BENCH_OUTPUT_DIR || 'benchmarks/results');
 
 function percentile(values, p) {
@@ -202,6 +203,34 @@ async function scenarioNotifyLatency(baseURL) {
   return { ops: lat.length, elapsedMs: lat.reduce((a, b) => a + b, 0), latencies: summarizeLatencies(lat), throughput: lat.length / ((lat.reduce((a, b) => a + b, 0) || 1) / 1000) };
 }
 
+async function scenarioNotifyStress(baseURL) {
+  const clientA = createClient({ baseURL, realtime: 'off' });
+  const clientB = createClient({ baseURL, realtime: 'sse' });
+  // warmup
+  await clientA.insert('bench', { id: `ns-seed`, k: 'seed', v: 0 }).catch(() => {});
+  await clientB.select({ table: 'bench', limit: 1 });
+  let received = 0;
+  const target = rows;
+  const stop = clientB.watch({ table: 'bench', limit: 1 }, (evt) => {
+    if (evt && (evt.pks?.length || (Array.isArray(evt.data) && evt.data.length > 0))) received++;
+  }, { initialSnapshot: false, debounceMs: 50 });
+  // Produce notifications concurrently via inserts (unique ids)
+  const tasks = Array.from({ length: target }, (_, i) => async () => {
+    await clientA.insert('bench', { id: `ns-${i}-${Math.random().toString(36).slice(2)}`, k: 'n', v: i }).catch(() => {});
+  });
+  const startCpu = process.cpuUsage();
+  const rssStart = process.memoryUsage().rss;
+  const started = Date.now();
+  await withConcurrency(concurrency, tasks);
+  // allow events to drain briefly
+  await new Promise((r) => setTimeout(r, 200));
+  const elapsedMs = Date.now() - started;
+  const cpu = process.cpuUsage(startCpu);
+  const rssEnd = process.memoryUsage().rss;
+  stop();
+  return { events: received, produced: target, elapsedMs, throughput: received / (elapsedMs / 1000), cpu, memory: { rssStart, rssEnd, delta: rssEnd - rssStart } };
+}
+
 async function run() {
   await fs.mkdir(outDir, { recursive: true });
   const { server, baseURL } = await setupServer();
@@ -220,6 +249,8 @@ async function run() {
       bench.add('update_conflict', async () => { results.scenarios['update_conflict'] = await scenarioUpdateConflict(client); });
     } else if (name === 'notify_latency') {
       bench.add('notify_latency', async () => { results.scenarios['notify_latency'] = await scenarioNotifyLatency(baseURL); });
+    } else if (name === 'notify_stress') {
+      bench.add('notify_stress', async () => { results.scenarios['notify_stress'] = await scenarioNotifyStress(baseURL); });
     }
   }
 

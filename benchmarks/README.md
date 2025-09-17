@@ -8,6 +8,7 @@ Harness scenarios:
 - select_window: paginated reads until exhaustion
 - update_conflict: concurrent updates with ifVersion
 - notify_latency: end-to-end watcher latency distribution
+ - notify_stress: high-volume notify throughput under many small mutations
 
 How to run
 1) Build the library so Node can import dist outputs

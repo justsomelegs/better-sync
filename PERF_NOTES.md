@@ -93,3 +93,19 @@ Results vs Iteration 2:
 Notes:
 - Parsing/alloc reductions mainly help under higher notify volume; add a stress scenario with many small diffs to amplify effects in future runs.
 
+## 2025-09-17 — Iteration 4 (SSE server emission + notify_stress scenario)
+
+- Changes:
+  - Server SSE now reuses a single TextEncoder, emits Uint8Array frames directly, caches keepalive/recover frames.
+  - Harness adds notify_stress: many small inserts with SSE consumers.
+
+Results vs Iteration 3:
+
+- insert_concurrent: 790.5 → 792.4 ops/s (+0.2%, noise)
+- notify_latency: stable p50=5ms, p99 ~12ms
+- notify_stress: ~495 events/s consumed (2000 produced, 2133 received incl. coalesced snapshots)
+
+Notes:
+- Stress shows server can push ~500 events/s locally with sql.js + SSE; CPU mainly in userland JSON/stringify and adapter.
+- Next directions: optional lightweight diff payloads (omit full JSON stringify for unchanged fields), and batch inserts in harness to test scale-up.
+
