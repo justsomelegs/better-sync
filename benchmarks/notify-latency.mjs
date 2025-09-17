@@ -36,7 +36,8 @@ const db = useLibsql
   : sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 const schema = { bench_notes: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
-const sync = createSync({ schema, database: db, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000, payload: process.env.BENCH_SSE_PAYLOAD === 'minimal' ? 'minimal' : 'full' } });
+const noIdem = process.env.BENCH_NO_IDEM === '1' ? { has: async () => false, get: async () => undefined, set: async () => {} } : undefined;
+const sync = createSync({ schema, database: db, idempotencyStore: noIdem, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000, payload: process.env.BENCH_SSE_PAYLOAD === 'minimal' ? 'minimal' : 'full', coalesceMs: 0 } });
 const server = http.createServer(toNodeHandler(sync.handler));
 await new Promise((r) => server.listen(0, r));
 const addr = server.address();
@@ -64,7 +65,8 @@ const stop = clientB.watch({ table: 'bench_notes', limit: 1 }, (evt) => {
 console.log(`Benchmarking notify latency over ${ITER} iterations (client.watch)...`);
 const bench = new Bench({ iterations: ITER, warmupIterations: 0 });
 bench.add('notify-latency', async () => {
-  await new Promise((r) => setTimeout(r, 5));
+  const wait = Number(process.env.BENCH_NOTIFY_WAIT_MS || 0);
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   const start = Date.now();
   const p = new Promise((res, rej) => {
     resolver = res;
