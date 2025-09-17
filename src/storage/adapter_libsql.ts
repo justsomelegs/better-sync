@@ -5,6 +5,8 @@ import { SyncError } from '../shared/errors';
 
 export function libsqlAdapter(config: { url: string; authToken?: string }): DatabaseAdapter {
 	let txClient: any | null = null;
+	const ensuredTables = new Set<string>();
+	let metaEnsured = false;
 	async function getClient() {
 		try {
 			const mod: any = await import('@libsql/client');
@@ -17,6 +19,22 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 	async function run(sql: string, params?: any[]) {
 		const c = txClient || await getClient();
 		return c.execute({ sql, args: params || [] });
+	}
+	async function ensureMeta() {
+		if (metaEnsured) return;
+		await run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
+		metaEnsured = true;
+	}
+	async function ensureTable(table: string, row: Record<string, unknown>) {
+		if (ensuredTables.has(table)) return;
+		const cols = Object.keys(row).filter((c) => c !== 'version');
+		if (cols.length === 0) return;
+		const defs = cols.map((c) => c === 'id' ? `${c} TEXT PRIMARY KEY` : `${c} TEXT`).join(',');
+		await run(`CREATE TABLE IF NOT EXISTS ${table} (${defs})`);
+		ensuredTables.add(table);
+	}
+	async function ensureMinimalTable(table: string) {
+		await run(`CREATE TABLE IF NOT EXISTS ${table} (id TEXT PRIMARY KEY, updatedAt INTEGER)`);
 	}
 	return createAdapter({
 		async begin() {
@@ -35,10 +53,10 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			try { await txClient.execute('ROLLBACK'); } catch {}
 			txClient = null;
 		},
-		async ensureMeta() {
-			await run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
-		},
+		async ensureMeta() { await ensureMeta(); },
 		async insert(table, row) {
+			await ensureMeta();
+			await ensureTable(table, row);
 			const cols = Object.keys(row);
 			const placeholders = cols.map((_, i) => `?`).join(',');
 			const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`;
@@ -54,6 +72,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			return { ...row } as any;
 		},
 		async updateByPk(table, pk, set, opts) {
+			await ensureMeta();
 			const key = canonicalPk(pk);
 			if (opts?.ifVersion != null) {
 				const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`, [table, key]);
@@ -83,6 +102,8 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			return { ok: true } as const;
 		},
 		async selectByPk(table, pk, select) {
+			await ensureMeta();
+			await ensureMinimalTable(table);
 			const key = canonicalPk(pk);
 			const res = await run(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`, [key]);
 			if (!res.rows || res.rows.length === 0) return null;
@@ -93,6 +114,8 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			const out: any = {}; for (const f of select) out[f] = full[f]; return out;
 		},
 		async selectWindow(table, req: any) {
+			await ensureMeta();
+			await ensureMinimalTable(table);
 			const orderBy: Record<string, 'asc' | 'desc'> = req.orderBy ?? defaultOrderBy();
 			const keys = Object.keys(orderBy);
 			let where = '';

@@ -22,14 +22,17 @@ import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
 import { createSync, createClient } from '../dist/index.mjs';
-import { sqliteAdapter } from '../dist/server.mjs';
+import { sqliteAdapter, libsqlAdapter } from '../dist/server.mjs';
 import { Bench } from 'tinybench';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);
 const dbFile = process.env.BENCH_FILE || join(tmpdir(), `bench_server_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
 const JSON_MODE = process.env.BENCH_JSON === '1';
-const db = sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
+const useLibsql = process.env.BENCH_ADAPTER === 'libsql';
+const db = useLibsql
+  ? libsqlAdapter({ url: process.env.LIBSQL_URL || `file:${dbFile}` })
+  : sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 const schema = { bench_items: { schema: z.object({ id: z.string().optional(), name: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
 const sync = createSync({ schema, database: db, autoMigrate: true });

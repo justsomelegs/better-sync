@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
-import { createSync, createClient, sqliteAdapter } from '../dist/index.mjs';
+import { createSync, createClient, sqliteAdapter, libsqlAdapter } from '../dist/index.mjs';
 import { Bench } from 'tinybench';
 
 const ITER = Number(process.env.BENCH_NOTIFY_ITER || 2000);
@@ -30,7 +30,10 @@ const dbFile = join(tmpdir(), `bench_notify_${Date.now()}.sqlite`);
 const dbUrl = `file:${dbFile}`;
 const JSON_MODE = process.env.BENCH_JSON === '1';
 
-const db = sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
+const useLibsql = process.env.BENCH_ADAPTER === 'libsql';
+const db = useLibsql
+  ? libsqlAdapter({ url: process.env.LIBSQL_URL || `file:${dbFile}` })
+  : sqliteAdapter({ url: dbUrl, flushMode: process.env.BENCH_FLUSH_MODE || 'sync' });
 const schema = { bench_notes: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
 const sync = createSync({ schema, database: db, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000, payload: process.env.BENCH_SSE_PAYLOAD === 'minimal' ? 'minimal' : 'full' } });

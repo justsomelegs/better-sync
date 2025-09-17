@@ -33,6 +33,8 @@ Environment variables
 - BENCH_JSON: When '1', emits structured JSON rather than console.table
 - JS_BENCH_BASELINE: When '1', sqlite adapter runs slower, legacy-like path
 - BENCH_FLUSH_MODE: 'sync' | 'async' | 'off' to control file flush latency
+ - BENCH_ADAPTER: 'sqlite' (default) or 'libsql' to switch adapters
+ - LIBSQL_URL: Optional custom URL for libsql (defaults to file: path)
 
 Notes
 - These are micro-benchmarks intended to compare relative performance and detect regressions.
