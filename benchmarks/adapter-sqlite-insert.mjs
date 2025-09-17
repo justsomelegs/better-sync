@@ -25,7 +25,7 @@ import http from 'node:http';
 import { toNodeHandler } from 'better-call/node';
 import { z } from 'zod';
 import { createSync, createClient } from '../dist/index.mjs';
-import { sqliteAdapter, libsqlAdapter } from '../dist/server.mjs';
+import { sqliteAdapter, libsqlAdapter } from '../dist/index.mjs';
 import { Bench } from 'tinybench';
 
 const rows = Number(process.env.BENCH_ROWS || 2000);

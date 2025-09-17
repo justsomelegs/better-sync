@@ -57,7 +57,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 		async insert(table, row) {
 			await ensureMeta();
 			await ensureTable(table, row);
-			const cols = Object.keys(row);
+			const cols = Object.keys(row).filter((c) => c !== 'version');
 			const placeholders = cols.map((_, i) => `?`).join(',');
 			const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES (${placeholders})`;
 			try {
