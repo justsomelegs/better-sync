@@ -282,75 +282,93 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
         if (done) break;
         if (!value) continue;
         buffer += td.decode(value);
-        const frames = buffer.split('\n\n');
-        buffer = frames.pop() || '';
-        for (const f of frames) {
-          if (f.startsWith(':')) continue; // keepalive
-          const idLine = f.split('\n').find((l) => l.startsWith('id: '));
-          if (idLine) {
-            const eid = idLine.slice(4).trim();
+        let sepIdx = buffer.indexOf('\n\n');
+        while (sepIdx !== -1) {
+          const f = buffer.slice(0, sepIdx);
+          buffer = buffer.slice(sepIdx + 2);
+          sepIdx = buffer.indexOf('\n\n');
+          if (f.length === 0 || f[0] === ':') continue; // keepalive or empty
+          // parse lines cheaply
+          let eid: string | null = null;
+          let isMutation = false;
+          let dataJson: string | null = null;
+          let lineStart = 0;
+          while (lineStart <= f.length) {
+            const nl = f.indexOf('\n', lineStart);
+            const end = nl === -1 ? f.length : nl;
+            const line = f.slice(lineStart, end);
+            if (line.startsWith('id: ')) eid = line.slice(4).trim();
+            else if (line === 'event: mutation') isMutation = true;
+            else if (line.startsWith('data: ')) dataJson = line.slice(6);
+            if (nl === -1) break;
+            lineStart = nl + 1;
+          }
+          if (eid) {
             lastEventId = eid;
             if (seenEventIds.has(eid)) continue;
             seenEventIds.add(eid);
             if (seenEventIds.size > maxSeen) {
-              // prune oldest half by recreating set (iteration order is insertion order for Set)
               const keep = Math.floor(maxSeen / 2);
-              const next = new Set<string>();
               let i = 0;
-              for (const v of seenEventIds) { if (i++ >= keep) break; next.add(v); }
-              seenEventIds.clear();
-              for (const v of next) seenEventIds.add(v);
+              for (const v of seenEventIds) { if (i++ >= keep) { seenEventIds.delete(v); } }
             }
           }
-          if (f.includes('event: mutation')) {
-            const dataLine = f.split('\n').find((l) => l.startsWith('data: '));
-            if (!dataLine) continue;
-            let payload: any = {};
-            try { payload = JSON.parse(dataLine.slice(6)); } catch { }
-            const tables = Array.isArray(payload.tables) ? payload.tables : [];
-            for (const t of tables) {
-              const tableName = t?.name as string;
-              if (!tableName || !watchers.has(tableName)) continue;
-              // Try apply diffs immediately when provided
-              const diffs = (t && t.diffs) || null;
-              if (diffs && typeof diffs === 'object') {
-                const tableCache = getTable(tableName);
-                for (const [rid, diff] of Object.entries(diffs as Record<string, { set?: any; unset?: string[] }>)) {
-                  const key = String(rid);
-                  const prev = tableCache.get(key) || {};
-                  const next = { ...prev, ...(diff.set || {}) };
-                  if (Array.isArray(diff.unset)) {
-                    for (const k of diff.unset) delete (next as any)[k];
+          if (!isMutation || !dataJson) continue;
+          let payload: any = {};
+          try { payload = JSON.parse(dataJson); } catch { }
+          const tables = Array.isArray(payload.tables) ? payload.tables : [];
+          for (const t of tables) {
+            const tableName = t?.name as string;
+            if (!tableName || !watchers.has(tableName)) continue;
+            const diffs = (t && t.diffs) || null;
+            if (diffs && typeof diffs === 'object') {
+              const tableCache = getTable(tableName);
+              for (const [rid, diff] of Object.entries(diffs as Record<string, { set?: any; unset?: string[] }>)) {
+                const key = String(rid);
+                const prev = tableCache.get(key);
+                if (prev) {
+                  if (diff.set && typeof diff.set === 'object') {
+                    for (const [k, v] of Object.entries(diff.set as any)) (prev as any)[k] = v as any;
                   }
+                  if (Array.isArray(diff.unset)) {
+                    for (const k of diff.unset) delete (prev as any)[k];
+                  }
+                } else {
+                  const next: any = (diff.set && typeof diff.set === 'object') ? { ...(diff.set as any) } : {};
                   tableCache.set(key, next);
                 }
-                notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
-              } else {
-                // no diffs: notify and debounce snapshot
-                notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
               }
-              // debounce snapshot per table: run per watcher with its args
-              if (tableDebounce.get(tableName)) continue;
-              const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? defaults.debounceMs;
-              tableDebounce.set(tableName, setTimeout(async () => {
-                tableDebounce.delete(tableName);
-                const subs = watchers.get(tableName);
-                if (!subs || subs.size === 0) return;
-                for (const entry of subs) {
-                  try {
-                    const res = await select({ table: tableName, where: entry.args.where, select: entry.args.select, orderBy: entry.args.orderBy, limit: entry.args.limit });
-                    entry.lastData = res.data;
-                    entry.status = 'live';
-                    entry.error = undefined;
-                    entry.fn({ table: tableName, data: res.data });
-                  } catch (e: any) {
-                    entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
-                    entry.status = 'retrying';
-                    entry.fn({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
-                  }
-                }
-              }, delay));
+              notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+            } else {
+              notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
             }
+            if (tableDebounce.get(tableName)) continue;
+            const subs = watchers.get(tableName);
+            let delay = defaults.debounceMs;
+            if (subs && subs.size > 0) {
+              for (const entry of subs) {
+                const d = entry.opts?.debounceMs ?? defaults.debounceMs;
+                if (d < delay) delay = d;
+              }
+            }
+            tableDebounce.set(tableName, setTimeout(async () => {
+              tableDebounce.delete(tableName);
+              const currentSubs = watchers.get(tableName);
+              if (!currentSubs || currentSubs.size === 0) return;
+              for (const entry of currentSubs) {
+                try {
+                  const res = await select({ table: tableName, where: entry.args.where, select: entry.args.select, orderBy: entry.args.orderBy, limit: entry.args.limit });
+                  entry.lastData = res.data;
+                  entry.status = 'live';
+                  entry.error = undefined;
+                  entry.fn({ table: tableName, data: res.data });
+                } catch (e: any) {
+                  entry.error = e instanceof Error ? e : new Error(String(e?.message || e));
+                  entry.status = 'retrying';
+                  entry.fn({ table: tableName, error: { code: 'INTERNAL', message: String(e?.message || e) } });
+                }
+              }
+            }, delay));
           }
         }
       }

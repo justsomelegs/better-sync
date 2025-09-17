@@ -75,3 +75,21 @@ Next:
 - Reduce allocations in SSE diff emission and client-side debounce path.
 - Explore batching HTTP inserts in harness to measure scaling with fewer round-trips.
 
+## 2025-09-17 — Iteration 3 (Client SSE parsing + in-place diffs)
+
+- Changes:
+  - Low-allocation SSE frame parsing (single-pass line scanner)
+  - In-place cache updates for diffs (mutate existing objects instead of spreading)
+  - Debounce delay selection minimized across watchers
+
+Results vs Iteration 2:
+
+- insert_seq: ~456.1 → 453.7 ops/s (noise)
+- insert_concurrent: 773.7 → 790.5 ops/s (+2.2%)
+- select_window: ~38.8k → 38.5k (noise)
+- update_conflict: ~222.2 → 221.2 (noise)
+- notify_latency: p99 improved 12 → 11 ms; throughput proxy ~175.8 → 167.4 (harness variability)
+
+Notes:
+- Parsing/alloc reductions mainly help under higher notify volume; add a stress scenario with many small diffs to amplify effects in future runs.
+
