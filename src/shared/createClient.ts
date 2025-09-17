@@ -38,7 +38,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   } catch {}
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
   const pollIntervalMs = config.pollIntervalMs ?? 1500;
-  const defaults = { debounceMs: config.defaults?.debounceMs ?? 20, pageLimit: config.defaults?.pageLimit ?? 100 } as const;
+  const defaults = { debounceMs: config.defaults?.debounceMs ?? 20, pageLimit: config.defaults?.pageLimit ?? 100, microBatchWindowMs: (config as any).defaults?.microBatchWindowMs ?? 3, microBatchMax: (config as any).defaults?.microBatchMax ?? 64, microBatchEnabled: (config as any).defaults?.microBatchEnabled ?? true } as const;
   const hooks = { onError: config.hooks?.onError, onRetry: config.hooks?.onRetry } as const;
   const debug = !!config.debug;
   const baseBackoffMs = config.reconnectBackoff?.baseMs ?? 500;
@@ -135,45 +135,107 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     return { data, nextCursor };
   }
 
-  // optimistic mutation helpers unchanged ...
-  async function insert(table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { clientOpId?: string }) {
-    let tempId: string | null = null;
-    if (!Array.isArray(rows)) {
-      const provided = (rows as any)?.id;
-      tempId = (typeof provided === 'string' || typeof provided === 'number') ? String(provided) : cryptoRandomId();
-      const t = getTable(table);
-      const key = String(tempId);
-      t.set(key, { ...(rows as any), id: key, updatedAt: Date.now(), __optimistic: true });
-      notify(table, { table, pks: [key] });
-      const ds = await getStore();
-      if (ds) await ds.apply([{ table, type: 'insert', row: { ...(rows as any), id: key } }]);
+  // Micro-batching for inserts (default enabled)
+  type PendingInsert = { row: Record<string, unknown>; resolve: (v: any) => void; reject: (e: any) => void; tempId: string | null };
+  const insertQueues = new Map<string, { items: PendingInsert[]; timer: any | null }>();
+  function enqueueInsert(table: string, item: PendingInsert) {
+    let q = insertQueues.get(table);
+    if (!q) { q = { items: [], timer: null }; insertQueues.set(table, q); }
+    q.items.push(item);
+    if (q.items.length >= defaults.microBatchMax) flushInsertQueue(table, q).catch(() => {});
+    else if (!q.timer) {
+      q.timer = setTimeout(() => { q!.timer = null; flushInsertQueue(table!, q!).catch(() => {}); }, defaults.microBatchWindowMs);
     }
+  }
+  async function flushInsertQueue(table: string, q: { items: PendingInsert[]; timer: any | null }) {
+    if (q.items.length === 0) return;
+    const batch = q.items.splice(0, defaults.microBatchMax);
+    const rows = batch.map(b => b.row);
+    const clientOpId = cryptoRandomId();
     try {
-      const clientOpId = opts?.clientOpId ?? cryptoRandomId();
       const res = await postJson('/mutate', { op: 'insert', table, rows, clientOpId });
       const json = await res.json();
-      if (!Array.isArray(rows)) {
-        const serverRow = (json as any).row ?? (Array.isArray((json as any).rows) ? (json as any).rows[0] : null);
+      const outRows: any[] = Array.isArray((json as any).rows) ? (json as any).rows : (Array.isArray(rows) ? rows.map(() => (json as any).row) : [(json as any).row]);
+      for (let i = 0; i < batch.length; i++) {
+        const it = batch[i];
+        const serverRow = outRows[i];
         if (serverRow) {
           const t = getTable(table);
-          if (tempId) t.delete(tempId);
+          if (it.tempId) t.delete(it.tempId);
           t.set(String(serverRow.id), serverRow);
-          // suppress notify here to avoid duplicate immediate events; SSE will notify and snapshot will follow
           const ds = await getStore();
           if (ds) await ds.apply([{ table, type: 'insert', row: serverRow }]);
+          it.resolve({ row: serverRow });
+        } else {
+          it.resolve(json);
         }
       }
-      return json as MutationResult;
     } catch (e) {
-      if (tempId) {
-        const t = getTable(table);
-        t.delete(tempId);
-        notify(table, { table, pks: [tempId] });
-        const ds = await getStore();
-        if (ds) await ds.apply([{ table, type: 'delete', pk: tempId }]);
+      for (const it of batch) {
+        if (it.tempId) {
+          const t = getTable(table);
+          t.delete(it.tempId);
+          notify(table, { table, pks: [it.tempId] });
+          const ds = await getStore();
+          if (ds) await ds.apply([{ table, type: 'delete', pk: it.tempId }]);
+        }
+        it.reject(e);
       }
-      throw e;
     }
+  }
+
+  async function insert(table: string, rows: Record<string, unknown> | Record<string, unknown>[], opts?: { clientOpId?: string }) {
+    if (Array.isArray(rows) || !defaults.microBatchEnabled) {
+      // Fast-path existing behavior
+      let tempId: string | null = null;
+      if (!Array.isArray(rows)) {
+        const provided = (rows as any)?.id;
+        tempId = (typeof provided === 'string' || typeof provided === 'number') ? String(provided) : cryptoRandomId();
+        const t = getTable(table);
+        const key = String(tempId);
+        t.set(key, { ...(rows as any), id: key, updatedAt: Date.now(), __optimistic: true });
+        notify(table, { table, pks: [key] });
+        const ds = await getStore();
+        if (ds) await ds.apply([{ table, type: 'insert', row: { ...(rows as any), id: key } }]);
+      }
+      try {
+        const clientOpId = opts?.clientOpId ?? cryptoRandomId();
+        const res = await postJson('/mutate', { op: 'insert', table, rows, clientOpId });
+        const json = await res.json();
+        if (!Array.isArray(rows)) {
+          const serverRow = (json as any).row ?? (Array.isArray((json as any).rows) ? (json as any).rows[0] : null);
+          if (serverRow) {
+            const t = getTable(table);
+            if (tempId) t.delete(tempId);
+            t.set(String(serverRow.id), serverRow);
+            const ds = await getStore();
+            if (ds) await ds.apply([{ table, type: 'insert', row: serverRow }]);
+          }
+        }
+        return json as MutationResult;
+      } catch (e) {
+        if (tempId) {
+          const t = getTable(table);
+          t.delete(tempId);
+          notify(table, { table, pks: [tempId] });
+          const ds = await getStore();
+          if (ds) await ds.apply([{ table, type: 'delete', pk: tempId }]);
+        }
+        throw e;
+      }
+    }
+    // Micro-batch single-row insert
+    const provided = (rows as any)?.id;
+    const tempId = (typeof provided === 'string' || typeof provided === 'number') ? String(provided) : cryptoRandomId();
+    const t = getTable(table);
+    const key = String(tempId);
+    t.set(key, { ...(rows as any), id: key, updatedAt: Date.now(), __optimistic: true });
+    notify(table, { table, pks: [key] });
+    const ds = await getStore();
+    if (ds) await ds.apply([{ table, type: 'insert', row: { ...(rows as any), id: key } }]);
+    return new Promise((resolve, reject) => {
+      enqueueInsert(table, { row: rows as any, resolve, reject, tempId });
+    });
   }
 
   async function update(table: string, pk: string | number | Record<string, string | number>, set: Record<string, unknown>, opts?: { ifVersion?: number; clientOpId?: string }) {
