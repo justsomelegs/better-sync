@@ -22,6 +22,19 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 		const res = await c.execute({ sql, args: params || [] });
 		return res;
 	}
+	const prepared = new Map<string, any>();
+	async function runPrepared(key: string, sql: string, params?: any[]) {
+		const c = txClient || await getClient();
+		let stmt = prepared.get(key);
+		if (!stmt) {
+			try { stmt = await (c as any).prepare?.(sql); } catch {}
+			if (stmt) prepared.set(key, stmt);
+		}
+		if (stmt) {
+			try { return await stmt.execute(params || []); } catch { /* fallback below */ }
+		}
+		return c.execute({ sql, args: params || [] });
+	}
 	async function ensureMeta() {
 		if (metaEnsured) return;
 		await run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`);
@@ -99,7 +112,7 @@ export function libsqlAdapter(config: { url: string; authToken?: string }): Data
 			if ((set as any).version != null) {
 				await run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?,?,?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version=excluded.version`, [table, key, (set as any).version]);
 			}
-			const res = await run(`SELECT * FROM ${table} WHERE id = ? LIMIT 1`, [key]);
+			const res = await runPrepared(`sel:${table}:byId`, `SELECT * FROM ${table} WHERE id = ? LIMIT 1`, [key]);
 			if (!res.rows || res.rows.length === 0) { throw new SyncError('NOT_FOUND', 'not found'); }
 			const row: any = rowFromLibsql(res.rows[0]);
 			const vres = await run(`SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`, [table, key]);

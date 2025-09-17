@@ -22,7 +22,7 @@ type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number; resyncMode
 
 type RealtimeMode = 'sse' | 'poll' | 'off';
 
-export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
+export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; dispatcher?: any; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
@@ -30,6 +30,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   const defaults = { debounceMs: config.defaults?.debounceMs ?? 20, pageLimit: config.defaults?.pageLimit ?? 100 } as const;
   const hooks = { onError: config.hooks?.onError, onRetry: config.hooks?.onRetry } as const;
   const debug = !!config.debug;
+  const dispatcher = (config as any).dispatcher;
   const baseBackoffMs = config.reconnectBackoff?.baseMs ?? 500;
   const maxBackoffMs = config.reconnectBackoff?.maxMs ?? 5000;
   const jitterMs = config.reconnectBackoff?.jitterMs ?? 250;
@@ -57,7 +58,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      ...(dispatcher ? { dispatcher } : {})
     });
     if (debug) {
       try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
@@ -271,7 +273,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       const headers: Record<string, string> = {};
       if (lastEventId) headers['Last-Event-ID'] = lastEventId;
       if (debug) { try { console.debug('[just-sync] SSE connect', { lastEventId }); } catch {} }
-      const res = await fetchImpl(`${baseURL}/events`, { signal: sseAC.signal, headers });
+      const res = await fetchImpl(`${baseURL}/events`, { signal: sseAC.signal, headers, ...(dispatcher ? { dispatcher } : {}) });
       if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
       retryAttempt = 0;
       if (debug) { try { console.debug('[just-sync] SSE connected'); } catch {} }

@@ -109,7 +109,7 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
     if (payloadMode === 'minimal' && Array.isArray(tables)) {
       tables = tables.map((t: any) => ({ name: t?.name, pks: t?.pks }));
     }
-    const frame = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify({ eventId: id, txId: data['txId'], tables })}\n\n`;
+    const frame = `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify({ tables })}\n\n`;
     sse.emit(frame, id, config.sse?.bufferMs ?? 60000, config.sse?.bufferCap ?? 10000);
   }
 
