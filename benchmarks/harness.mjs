@@ -44,6 +44,7 @@ const isWin = process.platform === 'win32';
 const notifyMode = (process.env.BENCH_NOTIFY_MODE || (isWin ? 'poll' : 'sse')) as 'sse'|'poll';
 const NOTIFY_ITER = Number(process.env.BENCH_NOTIFY_ITER || (isWin ? 100 : 2000));
 const NOTIFY_TIMEOUT_MS = Number(process.env.BENCH_NOTIFY_TIMEOUT || (isWin ? 2000 : 5000));
+const POLL_MS = Number(process.env.BENCH_POLL_MS || 250);
 
 function createProgress(total, label) {
   let last = -1;
@@ -328,8 +329,8 @@ async function scenarioMixedBatch(client) {
 }
 
 async function scenarioNotifyLatency(baseURL) {
-  const clientA = createClient({ baseURL, realtime: notifyMode, defaults: { microBatchEnabled: false } });
-  const clientB = createClient({ baseURL, realtime: notifyMode, defaults: { microBatchEnabled: false } });
+  const clientA = createClient({ baseURL, realtime: notifyMode, pollIntervalMs: notifyMode === 'poll' ? POLL_MS : undefined, defaults: { microBatchEnabled: false } });
+  const clientB = createClient({ baseURL, realtime: notifyMode, pollIntervalMs: notifyMode === 'poll' ? POLL_MS : undefined, defaults: { microBatchEnabled: false } });
   // Prime
   await clientA.insert('bench', { id: `n-seed`, k: 'seed', v: 0 }).catch(() => {});
   await clientA.select({ table: 'bench', limit: 1 });
@@ -367,7 +368,7 @@ async function scenarioNotifyLatency(baseURL) {
 
 async function scenarioNotifyStress(baseURL) {
   const clientA = createClient({ baseURL, realtime: 'off', defaults: { microBatchEnabled: false } });
-  const clientB = createClient({ baseURL, realtime: notifyMode, defaults: { microBatchEnabled: false } });
+  const clientB = createClient({ baseURL, realtime: notifyMode, pollIntervalMs: notifyMode === 'poll' ? POLL_MS : undefined, defaults: { microBatchEnabled: false } });
   // warmup
   await clientA.insert('bench', { id: `ns-seed`, k: 'seed', v: 0 }).catch(() => {});
   await clientB.select({ table: 'bench', limit: 1 });
