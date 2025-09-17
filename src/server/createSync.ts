@@ -127,9 +127,14 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 
 	const router = createRouter({ getEvents, postMutate, postSelect, postMutator });
 
-	const handler = router.handler;
+  const handler = router.handler;
+  // Optional artificial latency for harness (ignored if not set)
+  const extraLatency = Number((process as any).env?.BENCH_LATENCY_MS || 0);
 
-	const fetch = withRequestId(async (req: Request): Promise<Response> => handler(req));
+  const fetch = withRequestId(async (req: Request): Promise<Response> => {
+    if (extraLatency > 0) await new Promise((r) => setTimeout(r, extraLatency));
+    return handler(req);
+  });
 
 	return { handler: (req: Request) => fetch(req), fetch, mutators: (config.mutators ?? ({} as TMutators)) } as const;
 }

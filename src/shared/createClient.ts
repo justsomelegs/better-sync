@@ -25,16 +25,15 @@ type RealtimeMode = 'sse' | 'poll' | 'off';
 export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
-  // Node: attach keep-alive agent by default for HTTP/HTTPS to reuse sockets
-  let agent: any = undefined;
+  // Node: per-origin undici Pool for strong keep-alive/pooling without user config
+  let dispatcher: any = undefined;
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const http = require('node:http');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const https = require('node:https');
-    const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 256 });
-    const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 256 });
-    agent = { http: httpAgent, https: httpsAgent };
+    const undici = require('undici');
+    const origin = new URL(baseURL).origin;
+    const Pool = undici.Pool || undici.Agent; // Pool in newer undici, Agent in older
+    // High connections for local benches; pipelining conservative for safety
+    dispatcher = new Pool(origin, { connections: 256, pipelining: 1, keepAliveTimeout: 60_000 });
   } catch {}
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
   const pollIntervalMs = config.pollIntervalMs ?? 1500;
@@ -68,7 +67,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
-    , ...(agent ? { agent: (parsed => (parsed.protocol === 'http:' ? agent.http : agent.https))(new URL(url)) } : {}) });
+    , ...(dispatcher ? { dispatcher } : {}) });
     if (debug) {
       try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
     }
