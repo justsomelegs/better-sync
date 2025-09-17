@@ -127,3 +127,15 @@ Notes:
 - Snapshot coalescing reduces duplicate `/select` calls when multiple watchers exist; benefits grow with watcher count.
 - Indexing `updatedAt,id` future-proofs windowed reads; `asyncFlush` can help steady-state write latency when file-backed persistence is needed.
 
+## 2025-09-17 — Iteration 6 (Notify metrics with micro-batching disabled)
+
+- Changes:
+  - Harness sets microBatchEnabled=false for notify producers to avoid coalescing effects
+
+- Results:
+  - notify_latency: p50 ~1ms, p95 ~2ms, p99 ~4ms (2k iterations in ~2.8s)
+  - notify_stress: ~829 events/s
+
+- Notes:
+  - Client/server SSE paths appear healthy; remaining CPU is mostly JSON and adapter work.
+

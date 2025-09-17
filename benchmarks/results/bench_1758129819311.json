@@ -1,0 +1,40 @@
+{
+  "meta": {
+    "rows": 2000,
+    "concurrency": 32,
+    "iterations": 1,
+    "node": "v22.16.0",
+    "date": "2025-09-17T17:23:29.479Z"
+  },
+  "scenarios": {
+    "notify_latency": {
+      "ops": 2000,
+      "elapsedMs": 2800,
+      "latencies": {
+        "count": 2000,
+        "min": 1,
+        "max": 10,
+        "mean": 1.4,
+        "p50": 1,
+        "p95": 2,
+        "p99": 4
+      },
+      "throughput": 714.2857142857143
+    },
+    "notify_stress": {
+      "events": 2071,
+      "produced": 2000,
+      "elapsedMs": 2498,
+      "throughput": 829.0632506004803,
+      "cpu": {
+        "user": 2881772,
+        "system": 274800
+      },
+      "memory": {
+        "rssStart": 190197760,
+        "rssEnd": 245374976,
+        "delta": 55177216
+      }
+    }
+  }
+}

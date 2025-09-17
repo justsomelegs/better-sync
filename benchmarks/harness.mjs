@@ -200,8 +200,8 @@ async function scenarioUpdateConflict(client) {
 }
 
 async function scenarioNotifyLatency(baseURL) {
-  const clientA = createClient({ baseURL, realtime: 'sse' });
-  const clientB = createClient({ baseURL, realtime: 'sse' });
+  const clientA = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
+  const clientB = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
   // Prime
   await clientA.insert('bench', { id: `n-seed`, k: 'seed', v: 0 }).catch(() => {});
   await clientA.select({ table: 'bench', limit: 1 });
@@ -232,8 +232,8 @@ async function scenarioNotifyLatency(baseURL) {
 }
 
 async function scenarioNotifyStress(baseURL) {
-  const clientA = createClient({ baseURL, realtime: 'off' });
-  const clientB = createClient({ baseURL, realtime: 'sse' });
+  const clientA = createClient({ baseURL, realtime: 'off', defaults: { microBatchEnabled: false } });
+  const clientB = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
   // warmup
   await clientA.insert('bench', { id: `ns-seed`, k: 'seed', v: 0 }).catch(() => {});
   await clientB.select({ table: 'bench', limit: 1 });
