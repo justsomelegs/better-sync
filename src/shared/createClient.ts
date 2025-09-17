@@ -18,7 +18,7 @@ import type { ClientMutators, MutatorsSpec, ServerMutatorsSpec, ClientMutatorsFr
 type WatchArgs = string | { table: string; where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number };
 type WatchEvent = { table: string; pks?: (string | number | Record<string, unknown>)[]; rowVersions?: Record<string, number>; data?: any[]; error?: { code: string; message: string } };
 
-type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number };
+type WatchOptions = { initialSnapshot?: boolean; debounceMs?: number; resyncMode?: 'debounced' | 'never' };
 
 type RealtimeMode = 'sse' | 'poll' | 'off';
 
@@ -258,7 +258,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   let sseRunning = false;
   let lastEventId: string | null = null;
   const seenEventIds = new Set<string>();
-  const maxSeen = 5000;
+  const maxSeen = 1024;
   const tableDebounce = new Map<string, any>();
   let retryAttempt = 0;
 
@@ -337,12 +337,16 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
                 notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
               }
               if (tableDebounce.get(tableName)) continue;
-              const delay =  (Array.from(watchers.get(tableName) || [])[0]?.opts?.debounceMs) ?? defaults.debounceMs;
+              const subsForTable = watchers.get(tableName) || new Set();
+              const allNever = Array.from(subsForTable).every((e: any) => (e.opts?.resyncMode ?? 'debounced') === 'never');
+              if (allNever) continue;
+              const delay =  (Array.from(subsForTable)[0]?.opts?.debounceMs) ?? defaults.debounceMs;
               tableDebounce.set(tableName, setTimeout(async () => {
                 tableDebounce.delete(tableName);
                 const subs = watchers.get(tableName);
                 if (!subs || subs.size === 0) return;
                 for (const entry of subs) {
+                  if ((entry as any).opts?.resyncMode === 'never') continue;
                   try {
                     const res = await select({ table: tableName, where: entry.args.where, select: entry.args.select, orderBy: entry.args.orderBy, limit: entry.args.limit });
                     entry.lastData = res.data;
