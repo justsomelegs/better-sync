@@ -9,6 +9,8 @@
  * - select_window: paginated reads until exhaustion
  * - notify_latency: watcher latency distribution
  * - notify_stress: high-volume mutation notifications throughput
+ * - libsql_insert_local: direct adapter inserts using libsql into a local file
+ * - libsql_insert_remote: direct adapter inserts using libsql to LIBSQL_URL
  *
  * Metrics per scenario:
  * - throughput: ops/sec
@@ -113,6 +115,62 @@ async function scenarioInsertConcurrent(client) {
   const cpu = process.cpuUsage(startCpu);
   const rssEnd = process.memoryUsage().rss;
   return { ops: rows, elapsedMs, latencies: summarizeLatencies(lat), throughput: rows / (elapsedMs / 1000), cpu, memory: { rssStart, rssEnd, delta: rssEnd - rssStart } };
+}
+
+async function scenarioLibsqlInsertLocal() {
+  try {
+    const { createClient } = await import('@libsql/client');
+    const dbFile = join(tmpdir(), `bench_libsql_${Date.now()}.db`);
+    const url = `file:${dbFile}`;
+    const raw = createClient({ url });
+    await raw.execute(`CREATE TABLE IF NOT EXISTS bench (id TEXT PRIMARY KEY, k TEXT, v INTEGER, updatedAt INTEGER, version INTEGER)`);
+    const adapter = libsqlAdapter({ url });
+    await adapter.ensureMeta?.();
+    const lat = [];
+    const startCpu = process.cpuUsage();
+    const rssStart = process.memoryUsage().rss;
+    const started = Date.now();
+    for (let i = 0; i < rows; i++) {
+      const t0 = Date.now();
+      // eslint-disable-next-line no-await-in-loop
+      await adapter.insert('bench', { id: `l${i}`, k: `k${i}`, v: i, updatedAt: Date.now(), version: 1 });
+      lat.push(Date.now() - t0);
+    }
+    const elapsedMs = Date.now() - started;
+    const cpu = process.cpuUsage(startCpu);
+    const rssEnd = process.memoryUsage().rss;
+    return { ops: rows, elapsedMs, latencies: summarizeLatencies(lat), throughput: rows / (elapsedMs / 1000), cpu, memory: { rssStart, rssEnd, delta: rssEnd - rssStart } };
+  } catch (e) {
+    return { skipped: true, reason: String(e?.message || e) };
+  }
+}
+
+async function scenarioLibsqlInsertRemote() {
+  try {
+    const url = process.env.LIBSQL_URL;
+    if (!url) return { skipped: true, reason: 'LIBSQL_URL not set' };
+    const { createClient } = await import('@libsql/client');
+    const raw = createClient({ url });
+    await raw.execute(`CREATE TABLE IF NOT EXISTS bench (id TEXT PRIMARY KEY, k TEXT, v INTEGER, updatedAt INTEGER, version INTEGER)`);
+    const adapter = libsqlAdapter({ url });
+    await adapter.ensureMeta?.();
+    const lat = [];
+    const startCpu = process.cpuUsage();
+    const rssStart = process.memoryUsage().rss;
+    const started = Date.now();
+    for (let i = 0; i < rows; i++) {
+      const t0 = Date.now();
+      // eslint-disable-next-line no-await-in-loop
+      await adapter.insert('bench', { id: `r${i}`, k: `k${i}`, v: i, updatedAt: Date.now(), version: 1 });
+      lat.push(Date.now() - t0);
+    }
+    const elapsedMs = Date.now() - started;
+    const cpu = process.cpuUsage(startCpu);
+    const rssEnd = process.memoryUsage().rss;
+    return { ops: rows, elapsedMs, latencies: summarizeLatencies(lat), throughput: rows / (elapsedMs / 1000), cpu, memory: { rssStart, rssEnd, delta: rssEnd - rssStart } };
+  } catch (e) {
+    return { skipped: true, reason: String(e?.message || e) };
+  }
 }
 
 async function scenarioInsertBatch(client) {
@@ -292,6 +350,10 @@ async function run() {
         }
         results.scenarios['libsql_insert'] = { ok: true };
       });
+    } else if (name === 'libsql_insert_local') {
+      bench.add('libsql_insert_local', async () => { results.scenarios['libsql_insert_local'] = await scenarioLibsqlInsertLocal(); });
+    } else if (name === 'libsql_insert_remote') {
+      bench.add('libsql_insert_remote', async () => { results.scenarios['libsql_insert_remote'] = await scenarioLibsqlInsertRemote(); });
     }
   }
 

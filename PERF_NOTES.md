@@ -139,3 +139,16 @@ Notes:
 - Notes:
   - Client/server SSE paths appear healthy; remaining CPU is mostly JSON and adapter work.
 
+## 2025-09-17 — Iteration 7 (SSE gzip option + libsql local benchmark)
+
+- Changes:
+  - SSE endpoint now supports gzip when client sends Accept-Encoding: gzip
+  - Harness: libsql local-file and remote scenarios (env-gated)
+
+- Results:
+  - libsql_insert_local (2k rows): ~238 ops/s; much slower and heavy RSS vs in-process sql.js, expected due to WASM/driver overhead and file I/O path
+  - gzip expected to help over real networks; negligible effect on local loopback
+
+- Notes:
+  - For local/dev perf, in-process sql.js remains fastest. For production, use libsql/postgres with pooling and batch writes.
+
