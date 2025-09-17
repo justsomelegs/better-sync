@@ -37,7 +37,7 @@ const db = useLibsql
 const schema = { bench_notes: { schema: z.object({ id: z.string().optional(), title: z.string(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
 
 const noIdem = process.env.BENCH_NO_IDEM === '1' ? { has: async () => false, get: async () => undefined, set: async () => {} } : undefined;
-const sync = createSync({ schema, database: db, idempotencyStore: noIdem, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000, payload: process.env.BENCH_SSE_PAYLOAD === 'minimal' ? 'minimal' : 'full', coalesceMs: 0 } });
+const sync = createSync({ schema, database: db, idempotencyStore: noIdem, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 10000, payload: process.env.BENCH_SSE_PAYLOAD === 'minimal' ? 'minimal' : 'full', coalesceMs: Number(process.env.BENCH_COALESCE_MS || 0) } });
 const server = http.createServer(toNodeHandler(sync.handler));
 await new Promise((r) => server.listen(0, r));
 const addr = server.address();

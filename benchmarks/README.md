@@ -27,6 +27,10 @@ How to run
  - Current (optimized path; appends to PERFORMANCE.md)
    npm run bench:current
 
+ Production-like runs
+ - Use libsql with idempotency ON, minimal payload, small coalescing window
+   BENCH_ADAPTER=libsql BENCH_SSE_PAYLOAD=minimal BENCH_COALESCE_MS=2 npm run bench:json
+
 Environment variables
 - BENCH_ROWS: Number of rows to insert/select (default: 2000)
 - BENCH_FILE: File path for SQLite (default: OS tmp dir)
