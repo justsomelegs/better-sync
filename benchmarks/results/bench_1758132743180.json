@@ -1,0 +1,52 @@
+{
+  "meta": {
+    "rows": 100000,
+    "concurrency": 32,
+    "iterations": 1,
+    "node": "v22.16.0",
+    "date": "2025-09-17T18:11:21.835Z"
+  },
+  "scenarios": {
+    "cas_update": {
+      "ops": 100000,
+      "elapsedMs": 60730,
+      "throughput": 1646.6326362588507,
+      "outcomes": {
+        "ok": 0,
+        "conflict": 100000
+      },
+      "latencies": {
+        "count": 100000,
+        "min": 5,
+        "max": 322,
+        "mean": 19.43047,
+        "p50": 19,
+        "p95": 25,
+        "p99": 32
+      }
+    },
+    "select_window": {
+      "ops": 1,
+      "elapsedMs": 0,
+      "latencies": {
+        "count": 1,
+        "min": 0,
+        "max": 0,
+        "mean": 0,
+        "p50": 0,
+        "p95": 0,
+        "p99": 0
+      },
+      "throughput": null,
+      "cpu": {
+        "user": 565,
+        "system": 0
+      },
+      "memory": {
+        "rssStart": 247676928,
+        "rssEnd": 247676928,
+        "delta": 0
+      }
+    }
+  }
+}

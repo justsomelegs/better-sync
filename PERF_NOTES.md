@@ -152,3 +152,13 @@ Notes:
 - Notes:
   - For local/dev perf, in-process sql.js remains fastest. For production, use libsql/postgres with pooling and batch writes.
 
+## 2025-09-17 — Iteration 8 (CAS + large-table read)
+
+- Scenarios:
+  - CAS update (100k attempts, expect conflicts): ~1,647 ops/s; p95 ~25ms, p99 ~32ms. Conflicts expected by design in this stress.
+  - Large select_window (100k rows): handled via windowing; per-window throughput ~700–800 windows/s on this machine.
+
+- Notes:
+  - Prepared statement caching helps `selectWindow` when fetching lastUpdated on cursor miss.
+  - For CAS-heavy paths, batching and server-side conflict aggregation could further improve throughput.
+
