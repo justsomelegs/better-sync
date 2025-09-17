@@ -390,11 +390,11 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
           if (!isMutation || !dataJson) continue;
           let payload: any = {};
           try { payload = JSON.parse(dataJson); } catch { }
-          const tables = Array.isArray(payload.tables) ? payload.tables : [];
+          const tables = Array.isArray(payload.t) ? payload.t : (Array.isArray(payload.tables) ? payload.tables : []);
           for (const t of tables) {
-            const tableName = t?.name as string;
+            const tableName = (t?.n as string) || (t?.name as string);
             if (!tableName || !watchers.has(tableName)) continue;
-            const diffs = (t && t.diffs) || null;
+            const diffs = (t && (t.d || t.diffs)) || null;
             if (diffs && typeof diffs === 'object') {
               const tableCache = getTable(tableName);
               for (const [rid, diff] of Object.entries(diffs as Record<string, { set?: any; unset?: string[] }>)) {
@@ -412,9 +412,13 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
                   tableCache.set(key, next);
                 }
               }
-              notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              const pks = (t as any).p || (t as any).pks;
+              const vers = (t as any).v || (t as any).rowVersions;
+              notify(tableName, { table: tableName, pks, rowVersions: vers });
             } else {
-              notify(tableName, { table: tableName, pks: t.pks, rowVersions: t.rowVersions });
+              const pks = (t as any).p || (t as any).pks;
+              const vers = (t as any).v || (t as any).rowVersions;
+              notify(tableName, { table: tableName, pks, rowVersions: vers });
             }
             if (tableDebounce.get(tableName)) continue;
             const subs = watchers.get(tableName);

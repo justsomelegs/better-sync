@@ -6,6 +6,7 @@
  * - insert_concurrent: concurrent inserts via HTTP client
  * - insert_batch: batched inserts via HTTP client (array payloads)
  * - update_conflict: concurrent updates with ifVersion to trigger conflicts
+ * - cas_update: single-round-trip update with ifVersion, measures CAS throughput
  * - select_window: paginated reads until exhaustion
  * - notify_latency: watcher latency distribution
  * - notify_stress: high-volume mutation notifications throughput
@@ -258,6 +259,28 @@ async function scenarioUpdateConflict(client) {
   return { ops: rows, elapsedMs, latencies: summarizeLatencies(lat), throughput: rows / (elapsedMs / 1000), outcomes: { ok, conflict, otherErr }, cpu, memory: { rssStart, rssEnd, delta: rssEnd - rssStart } };
 }
 
+async function scenarioCasUpdate(client) {
+  const baseId = `cas-${Date.now()}`;
+  await client.insert('bench', { id: baseId, k: 'base', v: 0 });
+  const lat = [];
+  let ok = 0, conflict = 0;
+  const tasks = Array.from({ length: rows }, (_, i) => async () => {
+    const t0 = Date.now();
+    try {
+      await client.update('bench', baseId, { v: i }, { ifVersion: undefined });
+      ok++;
+    } catch {
+      conflict++;
+    } finally {
+      lat.push(Date.now() - t0);
+    }
+  });
+  const started = Date.now();
+  await withConcurrency(concurrency, tasks);
+  const elapsedMs = Date.now() - started;
+  return { ops: rows, elapsedMs, throughput: rows / (elapsedMs / 1000), outcomes: { ok, conflict }, latencies: summarizeLatencies(lat) };
+}
+
 async function scenarioNotifyLatency(baseURL) {
   const clientA = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
   const clientB = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
@@ -340,6 +363,8 @@ async function run() {
       bench.add('notify_latency', async () => { results.scenarios['notify_latency'] = await scenarioNotifyLatency(baseURL); });
     } else if (name === 'notify_stress') {
       bench.add('notify_stress', async () => { results.scenarios['notify_stress'] = await scenarioNotifyStress(baseURL); });
+    } else if (name === 'cas_update') {
+      bench.add('cas_update', async () => { results.scenarios['cas_update'] = await scenarioCasUpdate(client); });
     } else if (name === 'libsql_insert' && process.env.LIBSQL_URL) {
       bench.add('libsql_insert', async () => {
         const adapter = libsqlAdapter({ url: process.env.LIBSQL_URL });

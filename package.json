@@ -57,7 +57,9 @@
     "format": "biome format . --write",
     "bench:legacy": "node benchmarks/adapter-sqlite-insert.mjs && node benchmarks/server-mutate-insert.mjs && node benchmarks/server-select-window.mjs && node benchmarks/notify-latency.mjs",
     "bench": "node benchmarks/harness.mjs",
-    "bench:ci": "BENCH_ROWS=2000 BENCH_CONCURRENCY=32 node benchmarks/harness.mjs"
+    "bench:ci": "BENCH_ROWS=2000 BENCH_CONCURRENCY=32 node benchmarks/harness.mjs",
+    "profile:insert": "0x -- node benchmarks/harness.mjs",
+    "profile:notify": "0x -- BENCH_SCENARIOS=notify_latency,notify_stress node benchmarks/harness.mjs"
   },
   "engines": {
     "node": ">=18"

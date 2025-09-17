@@ -184,8 +184,9 @@ export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flus
         if (keys.length === 1 && keys[0] === 'updatedAt' && (orderBy as any).updatedAt === 'desc') {
           let lastUpdated: number | null = (cur.lastKeys as any)?.updatedAt as any;
           if (lastUpdated == null) {
-            const s = db.prepare(`SELECT updatedAt FROM ${table} WHERE id = ? LIMIT 1`);
-            s.bind([cur.lastId]); const has = s.step(); const obj = has ? s.getAsObject() as any : {}; s.free();
+            const lSQL = `SELECT updatedAt FROM ${table} WHERE id = ? LIMIT 1`;
+            const s = acquireStmt(db, lSQL);
+            s.bind([cur.lastId]); const has = s.step(); const obj = has ? s.getAsObject() as any : {}; releaseStmt(lSQL, s);
             lastUpdated = obj.updatedAt ?? 0;
           }
           sql += ` WHERE (t.updatedAt < ?) OR (t.updatedAt = ? AND t.id > ?)`; params.push(lastUpdated, lastUpdated, cur.lastId);
