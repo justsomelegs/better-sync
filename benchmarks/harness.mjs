@@ -245,7 +245,9 @@ async function scenarioUpdateConflict(client) {
       ok++;
     } catch (e) {
       const msg = String(e?.message || e);
-      if (msg.includes('Version mismatch') || msg.includes('CONFLICT')) conflict++; else otherErr++;
+      const code = (e && (e.code || e.name)) || '';
+      const status = (e && e.status) || 0;
+      if (msg.includes('Version mismatch') || msg.includes('CONFLICT') || code === 'CONFLICT' || status === 409) conflict++; else otherErr++;
     } finally {
       lat.push(Date.now() - t0);
     }
