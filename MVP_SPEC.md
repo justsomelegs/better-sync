@@ -203,13 +203,13 @@ Content-Type: application/json
 
 Server behavior:
 - IDs: Server is authoritative and serverless-friendly.
-  - Generates ULIDs for inserted rows. Client-provided ids are always replaced by server-issued ULIDs for scalar PK tables.
+  - Generates ULIDs for inserted rows by default. Client-provided ids are accepted only if policy allows (e.g., valid ULID); otherwise replaced by server-issued ULIDs.
   - Responses include `{ tempId, id }` mapping when a temporary client id was used so the client can reconcile.
   - Composite PKs are allowed per table config and are always accepted as provided.
-- Sets `updatedAt` (ms) on each write; LWW conflict policy on `updatedAt` with deterministic tie-breaker on `id`.
-- Emits SSE events after successful writes.
+- Sets `updatedAt` (ms) on each write; ordering/conflicts are resolved by server-assigned `version` (row-level LWW by `version`). `updatedAt` is for UX only.
+- Appends to `_sync_outbox` within the same transaction and emits SSE after commit.
 
-Auth: Out of scope for MVP. Request context passthrough supported (e.g., headers → `ctx`), enforcement to be added later without breaking API.
+Auth: Provider-agnostic hooks are available. Users bring any auth (Better Auth, Supabase, Clerk, custom) via `auth.getUser` and optional `policies`.
 
 ---
 
@@ -382,11 +382,11 @@ Semantics:
 
 ## Realtime Semantics
 
-SSE is the default realtime channel. Each event has a monotonic `id` (ULID) and the server keeps a small ring buffer so clients can resume without a full snapshot after brief disconnects.
-- **Default**: SSE for push notifications on successful server-side mutations, with event IDs and resume support.
-- **Resume**: Clients include `Last-Event-ID` (or `?since=`) on reconnect to receive any missed events from a small server-side buffer; if the buffer cannot satisfy, the client performs a fresh snapshot.
-- **Fallback**: If SSE is unsupported, client falls back to periodic HTTP polling (interval configurable). When events are received, matching `watch` subscriptions refresh their data.
-- **External DB writes** (not via our API): Not observed in MVP. Post-MVP will add DB triggers/CDC/scanners.
+SSE is the default realtime channel. Each event has a monotonic `id` (ULID). The server tails a DB-backed `_sync_outbox`, so resume works across cold starts and multiple instances without in-memory buffers.
+- **Default**: SSE push on successful server mutations, with event IDs and resume support via `Last-Event-ID`.
+- **Resume**: On reconnect, the server streams from `_sync_outbox` starting after the provided `Last-Event-ID`. If the retention window cannot satisfy the gap, the client performs a fresh snapshot and resumes from the new high-water mark.
+- **Fallback**: Polling is opt-in. When `mode` is `'sse-poll-fallback'` or `'poll'`, the client uses `GET /changes?since=` to catch up. Matching `watch` subscriptions refresh on change.
+- **External DB writes** (not via our API): Not observed in MVP. Post‑MVP will add DB triggers/CDC/scanners.
 
 Defaults:
 - SSE `id` format: ULID (monotonic where supported). `eventId` mirrors SSE `id`.
