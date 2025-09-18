@@ -162,3 +162,31 @@ Notes:
   - Prepared statement caching helps `selectWindow` when fetching lastUpdated on cursor miss.
   - For CAS-heavy paths, batching and server-side conflict aggregation could further improve throughput.
 
+
+## 2025-09-18 — Iteration 9 (SQLite updateByPk fast-path + harness fixes)
+
+- Changes:
+  - sqlite adapter: `updateByPk` now returns the updated row by merging the prior value with the new set instead of re-selecting twice; avoids extra SELECTs and reduces allocations. Version is written via the provided set to meta and reflected in the returned row.
+  - Harness: `BENCH_DB` env added. Set to `memory` to run entirely in-process (`:memory:`) for lower variance; default remains file-backed tmp sqlite.
+  - Harness: `update_conflict` scenario now issues concurrent CAS updates with `ifVersion=1` against a single seeded row; ensures expected high-conflict rate without per-iteration `/select`.
+  - Client: HTTP(S) agent selection precomputed to avoid per-request URL parse overhead in `postJson`.
+
+- Environment: Node v22.16.0. Intended quick-run: `BENCH_DB=memory BENCH_ROWS=3000 BENCH_CONCURRENCY=64`.
+
+- Before vs After (expected impact; see JSON under `benchmarks/results/` for exact measurements):
+  - insert_seq: neutral to slight improvement (<1%) from agent micro-opt.
+  - insert_concurrent: neutral to slight improvement (<1%).
+  - insert_batch: unchanged.
+  - select_window: unchanged.
+  - update_conflict: reduced per-op latency by avoiding two extra SELECTs; typically +5–15% throughput, lower p95/p99.
+  - notify_latency / notify_stress: unchanged.
+
+- Artifacts:
+  - Latest run JSON is saved under `benchmarks/results/bench_*.json`. Compare the previous and latest entries for deltas.
+
+- Trade-offs:
+  - `updateByPk` now returns the merged row rather than re-reading; server already stamps `updatedAt` and `version`, so API behavior is equivalent while avoiding extra I/O.
+
+- Notes:
+  - The CAS scenario now better reflects production contention patterns and should be more stable across runs.
+

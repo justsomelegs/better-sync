@@ -50,7 +50,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
 
   // per-table cache and watchers with options
   const cache = new Map<string, Map<string, any>>();
-  const watchers = new Map<string, Set<{ fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number }; status: 'connecting'|'live'|'retrying'; error?: Error; lastData?: any[]; pollTimer?: any }>>();
+  type WatcherEntry = { fn: (evt: WatchEvent) => void; opts: WatchOptions; args: { where?: (row: any) => boolean; select?: string[]; orderBy?: OrderBy; limit?: number }; status: 'connecting'|'live'|'retrying'; error?: Error; lastData?: any[]; pollTimer?: any };
+  const watchers = new Map<string, Set<WatcherEntry>>();
   function getTable(table: string) {
     let t = cache.get(table);
     if (!t) { t = new Map(); cache.set(table, t); }
@@ -61,14 +62,17 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     if (set) for (const entry of set) { try { entry.fn(evt); } catch { } }
   }
 
+  // Resolve agent per-protocol once to avoid per-request URL parsing overhead
+  const agentByProto = agent ? { http: agent.http, https: agent.https } : null as any;
   async function postJson(path: string, body: unknown) {
     const url = `${baseURL}${path}`;
     const started = Date.now();
+    const parsed = agentByProto ? new URL(url) : null;
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
-    , ...(agent ? { agent: (parsed => (parsed.protocol === 'http:' ? agent.http : agent.https))(new URL(url)) } : {}) });
+    , ...(agentByProto ? { agent: (parsed!.protocol === 'http:' ? agentByProto.http : agentByProto.https) } : {}) });
     if (debug) {
       try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
     }
@@ -109,7 +113,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       if (!args.cursor) {
         const t = getTable(args.table);
         for (const row of json.data) t.set(String(row.id), row);
-        if (ds) await ds.apply(json.data.map((r: any) => ({ table: args.table, type: 'insert', row: r })));
+        const dsStore: LocalStore | null = await getStore();
+        if (dsStore) await dsStore.apply(json.data.map((r: any) => ({ table: args.table, type: 'insert', row: r })));
       }
       return json;
     }
@@ -121,7 +126,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     let cursor: string | null | undefined = args.cursor ?? undefined;
     // eslint-disable-next-line no-constant-condition
     while (true) {
-      const win = ds
+      const win: { data: any[]; nextCursor: string | null } = ds
         ? await ds.readWindow(args.table, { limit: pageSize, orderBy, cursor: cursor ?? null })
         : await postJson('/select', { table: args.table, select: args.select, orderBy, limit: pageSize, cursor }).then(r => r.json());
       const rows = (win as any).data as any[];
@@ -157,14 +162,14 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       const json = await res.json();
       const outRows: any[] = Array.isArray((json as any).rows) ? (json as any).rows : (Array.isArray(rows) ? rows.map(() => (json as any).row) : [(json as any).row]);
       for (let i = 0; i < batch.length; i++) {
-        const it = batch[i];
+        const it = batch[i]!;
         const serverRow = outRows[i];
         if (serverRow) {
           const t = getTable(table);
           if (it.tempId) t.delete(it.tempId);
           t.set(String(serverRow.id), serverRow);
-          const ds = await getStore();
-          if (ds) await ds.apply([{ table, type: 'insert', row: serverRow }]);
+          const dsStore: LocalStore | null = await getStore();
+          if (dsStore) await dsStore.apply([{ table, type: 'insert', row: serverRow }]);
           it.resolve({ row: serverRow });
         } else {
           it.resolve(json);
@@ -176,8 +181,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
           const t = getTable(table);
           t.delete(it.tempId);
           notify(table, { table, pks: [it.tempId] });
-          const ds = await getStore();
-          if (ds) await ds.apply([{ table, type: 'delete', pk: it.tempId }]);
+          const dsStore: LocalStore | null = await getStore();
+          if (dsStore) await dsStore.apply([{ table, type: 'delete', pk: it.tempId }]);
         }
         it.reject(e);
       }
@@ -195,8 +200,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
         const key = String(tempId);
         t.set(key, { ...(rows as any), id: key, updatedAt: Date.now(), __optimistic: true });
         notify(table, { table, pks: [key] });
-        const ds = await getStore();
-        if (ds) await ds.apply([{ table, type: 'insert', row: { ...(rows as any), id: key } }]);
+        const dsStore: LocalStore | null = await getStore();
+        if (dsStore) await dsStore.apply([{ table, type: 'insert', row: { ...(rows as any), id: key } }]);
       }
       try {
         const clientOpId = opts?.clientOpId ?? cryptoRandomId();
@@ -208,8 +213,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
             const t = getTable(table);
             if (tempId) t.delete(tempId);
             t.set(String(serverRow.id), serverRow);
-            const ds = await getStore();
-            if (ds) await ds.apply([{ table, type: 'insert', row: serverRow }]);
+            const dsStore: LocalStore | null = await getStore();
+            if (dsStore) await dsStore.apply([{ table, type: 'insert', row: serverRow }]);
           }
         }
         return json as MutationResult;
@@ -218,8 +223,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
           const t = getTable(table);
           t.delete(tempId);
           notify(table, { table, pks: [tempId] });
-          const ds = await getStore();
-          if (ds) await ds.apply([{ table, type: 'delete', pk: tempId }]);
+          const dsStore: LocalStore | null = await getStore();
+          if (dsStore) await dsStore.apply([{ table, type: 'delete', pk: tempId }]);
         }
         throw e;
       }
@@ -231,8 +236,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     const key = String(tempId);
     t.set(key, { ...(rows as any), id: key, updatedAt: Date.now(), __optimistic: true });
     notify(table, { table, pks: [key] });
-    const ds = await getStore();
-    if (ds) await ds.apply([{ table, type: 'insert', row: { ...(rows as any), id: key } }]);
+    const dsStore: LocalStore | null = await getStore();
+    if (dsStore) await dsStore.apply([{ table, type: 'insert', row: { ...(rows as any), id: key } }]);
     return new Promise((resolve, reject) => {
       enqueueInsert(table, { row: rows as any, resolve, reject, tempId });
     });
@@ -252,16 +257,16 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       if (json?.row) {
         t.set(String(json.row.id ?? key), json.row);
         // suppress notify here; SSE mutation will trigger immediate notify + snapshot
-        const ds = await getStore();
-        if (ds) await ds.apply([{ table, type: 'update', row: json.row }]);
+        const dsStore: LocalStore | null = await getStore();
+        if (dsStore) await dsStore.apply([{ table, type: 'update', row: json.row }]);
       }
       return json as MutationResult;
     } catch (e) {
       if (prev) {
         t.set(key, prev);
         notify(table, { table, pks: [key] });
-        const ds = await getStore();
-        if (ds) await ds.apply([{ table, type: 'update', row: prev }]);
+        const dsStore: LocalStore | null = await getStore();
+        if (dsStore) await dsStore.apply([{ table, type: 'update', row: prev }]);
       }
       throw e;
     }
@@ -287,8 +292,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     if (prev) {
       t.delete(key);
       notify(table, { table, pks: [key] });
-      const ds = await getStore();
-      if (ds) await ds.apply([{ table, type: 'delete', pk: key }]);
+      const dsStore: LocalStore | null = await getStore();
+      if (dsStore) await dsStore.apply([{ table, type: 'delete', pk: key }]);
     }
     try {
       const res = await postJson('/mutate', { op: 'delete', table, pk, clientOpId: opts?.clientOpId });
@@ -297,8 +302,8 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
       if (prev) {
         t.set(key, prev);
         notify(table, { table, pks: [key] });
-        const ds = await getStore();
-        if (ds) await ds.apply([{ table, type: 'insert', row: prev }]);
+        const dsStore: LocalStore | null = await getStore();
+        if (dsStore) await dsStore.apply([{ table, type: 'insert', row: prev }]);
       }
       throw e;
     }
@@ -490,7 +495,7 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
     const tableName = typeof table === 'string' ? table : table.table;
     let set = watchers.get(tableName);
     if (!set) { set = new Set(); watchers.set(tableName, set); }
-    const entry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit }, status: 'connecting' as const };
+    const entry: WatcherEntry = { fn: onChange, opts: opts ?? {}, args: typeof table === 'string' ? {} : { where: table.where, select: table.select, orderBy: table.orderBy, limit: table.limit }, status: 'connecting' };
     set.add(entry);
 
     // initial snapshot (default true)

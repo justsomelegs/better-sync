@@ -109,18 +109,21 @@ export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flus
       const db = await ready;
       if (!metaEnsured) { db.run(`CREATE TABLE IF NOT EXISTS _sync_versions (table_name TEXT NOT NULL, pk_canonical TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (table_name, pk_canonical))`); metaEnsured = true; }
       const key = canonicalPk(pk);
+      // Load current row once
       let g: any;
       const gSQL = `SELECT * FROM ${table} WHERE id = ? LIMIT 1`;
       try { g = acquireStmt(db, gSQL); }
       catch (err: any) { throw new SyncError('NOT_FOUND', 'not found'); }
       g.bind([key]); const cur = g.step() ? g.getAsObject() : null; releaseStmt(gSQL, g);
       if (!cur) { throw new SyncError('NOT_FOUND', 'not found'); }
+      // Optional CAS check against meta version
       if (opts?.ifVersion != null) {
         const vSQL = `SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`;
         const v = acquireStmt(db, vSQL);
         v.bind([table, key]); const has = v.step(); const metaVer = has ? (v.getAsObject() as any).version : null; releaseStmt(vSQL, v);
         if (metaVer != null && metaVer !== opts.ifVersion) { throw new SyncError('CONFLICT', 'Version mismatch', { expectedVersion: opts.ifVersion, actualVersion: metaVer }); }
       }
+      // Apply update
       const next: any = { ...set };
       const cols = Object.keys(next).filter((c) => c !== 'version');
       if (cols.length > 0) {
@@ -131,15 +134,10 @@ export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flus
         db.run(`INSERT INTO _sync_versions(table_name, pk_canonical, version) VALUES (?, ?, ?) ON CONFLICT(table_name, pk_canonical) DO UPDATE SET version = excluded.version`, [table, key, next.version]);
       }
       dirtySinceExport = dirtySinceExport || !!filePath;
-      const outSQL = `SELECT * FROM ${table} WHERE id = ? LIMIT 1`;
-      const out = acquireStmt(db, outSQL);
-      out.bind([key]); const row = out.step() ? out.getAsObject() : null; releaseStmt(outSQL, out);
-      if (!row) { throw new SyncError('NOT_FOUND', 'not found'); }
-      // augment with version from meta
-      const v2SQL = `SELECT version FROM _sync_versions WHERE table_name = ? AND pk_canonical = ? LIMIT 1`;
-      const v2 = acquireStmt(db, v2SQL);
-      v2.bind([table, key]); const has2 = v2.step(); const verOut = has2 ? (v2.getAsObject() as any).version : undefined; releaseStmt(v2SQL, v2);
-      return { ...(row as any), ...(verOut != null ? { version: verOut } : {}) } as any;
+      // Compose result without extra selects: merge cur with set
+      const merged: any = { ...(cur as any), ...set };
+      if (typeof next.version === 'number') merged.version = next.version;
+      return merged as any;
     },
     async deleteByPk(table: string, pk: PrimaryKey) {
       const db = await ready;

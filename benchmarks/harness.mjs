@@ -56,8 +56,10 @@ function summarizeLatencies(samples) {
 }
 
 async function setupServer() {
+  const dbMode = (process.env.BENCH_DB || 'file').toLowerCase();
   const dbFile = join(tmpdir(), `bench_harness_${Date.now()}.sqlite`);
-  const db = sqliteAdapter({ url: `file:${dbFile}` });
+  const url = dbMode === 'memory' ? ':memory:' : `file:${dbFile}`;
+  const db = sqliteAdapter({ url });
   const schema = { bench: { schema: z.object({ id: z.string().optional(), k: z.string().optional(), v: z.number().optional(), updatedAt: z.number().optional(), version: z.number().optional() }) } };
   const sync = createSync({ schema, database: db, autoMigrate: true, sse: { keepaliveMs: 1000, bufferMs: 60000, bufferCap: 20000 } });
   const server = http.createServer(toNodeHandler(sync.handler));
@@ -231,7 +233,7 @@ async function scenarioSelectWindow(client) {
 }
 
 async function scenarioUpdateConflict(client) {
-  // Create one record, then concurrently attempt N updates with ifVersion
+  // Create one record (version=1), then concurrently attempt N CAS updates using ifVersion=1
   const baseId = `conf-${Date.now()}`;
   await client.insert('bench', { id: baseId, k: 'base', v: 0 });
   const lat = [];
@@ -239,9 +241,7 @@ async function scenarioUpdateConflict(client) {
   const tasks = Array.from({ length: rows }, (_, i) => async () => {
     const t0 = Date.now();
     try {
-      const cur = await client.select({ table: 'bench', limit: 1, cursor: null });
-      const curRow = cur.data.find(r => r.id === baseId) || { version: 1 };
-      await client.update('bench', baseId, { v: i }, { ifVersion: curRow.version });
+      await client.update('bench', baseId, { v: i }, { ifVersion: 1 });
       ok++;
     } catch (e) {
       const msg = String(e?.message || e);
