@@ -115,23 +115,15 @@ Notes:
 This section shows how to stand up the server, define custom mutators (server functions), and how request context flows into handlers. The server is authoritative for IDs, versions, and timestamps.
 
 ```ts
-import { createSync } from 'just-sync';
-import { sqliteAdapter } from 'just-sync/storage/server';
+import { createSyncEngine } from 'just-sync';
+import { sqliteNode } from 'just-sync/storage/sqlite-node';
 import { schema } from './schema';
+import { z } from 'zod';
 
-export const sync = createSync({
+export const sync = createSyncEngine({
   schema,
-  database: sqliteAdapter({ url: 'file:./app.db' })
-});
-// `createSync` wires:
-// - transactional mutations
-// - version assignment and updatedAt stamping
-// - SSE event emission (with eventId, txId, rowVersions, and optional diffs)
-// - a unified handler interface (handler/fetch/next)
-// Option A (recommended): define mutators in config
-export const sync = createSync({
-  schema,
-  database: sqliteAdapter({ url: 'file:./app.db' }),
+  adapter: sqliteNode({ url: 'file:./app.db' }),
+  mode: 'sse',
   mutators: {
     addTodo: {
       args: z.object({ title: z.string().min(1) }),
@@ -150,28 +142,6 @@ export const sync = createSync({
   }
 });
 
-// Option B (advanced): register mutators via method
-export const mutators = sync.defineMutators({
-  addTodo: {
-    args: z.object({ title: z.string().min(1) }),
-    handler: async ({ db, ctx }, { title }) => {
-      const row = await db.insert('todos', { title, done: false });
-      return row;
-    }
-  },
-  toggleAll: {
-    args: z.object({ done: z.boolean() }),
-    handler: async ({ db }, { done }) => {
-      const { pks } = await db.updateWhere('todos', { set: { done } });
-      return { ok: true, count: pks.length };
-    }
-  }
-});
-// Notes:
-// - `args` provides runtime validation. Types are inferred end-to-end.
-// - `ctx` can include request metadata (e.g., userId) for future auth.
-// - Mutators run inside a server transaction; on success, standard SSE events emit and clients reconcile.
-
 // Framework mounting (examples)
 export const handler = sync.handler;          // Express/Hono style
 export const fetch = sync.fetch;              // (req: Request) => Promise<Response>
@@ -182,6 +152,7 @@ export const { GET, POST } = toNextJsHandler(sync.handler);
 
 Internalized routes (no configuration needed):
 - `GET    /events` – SSE stream (default realtime channel)
+- `GET    /changes` – pull changes feed (used only if mode permits polling)
 - `POST   /mutate` – unified insert/update/delete endpoint
 - `POST   /select` – read endpoint
 - `POST   /mutators/:name` – invoke a registered server mutator
@@ -246,45 +217,11 @@ Auth: Out of scope for MVP. Request context passthrough supported (e.g., headers
 
 The client maintains a local optimistic cache by default with zero configuration. Writes apply immediately, then reconcile with server responses and SSE events. On error, the client auto-rolls back the local change. No developer code is required to enable or manage optimistic behavior.
 
-### Typing & Inference (Better Auth-style)
+### Derived Types (no generics, no codegen)
 
-To get full IntelliSense without generics, add a tiny ambient file once:
-```ts
-// sync-env.d.ts (type-only; ensure tsconfig includes it)
-import type { schema } from './server/schema';
-import type { mutators } from './server/sync';
-
-declare module 'just-sync' {
-  interface AppTypes {
-    Schema: typeof schema;
-    Mutators: typeof mutators;
-  }
-}
-```
-After this, `createClient({ ... })` is fully typed across tables and RPCs.
-
-Alternative: Exported generics from the server
-```ts
-// server/sync.types.ts (type-only helper)
-import type { schema } from './schema';
-import type { mutators } from './sync';
-
-export type AppTypes = {
-  Schema: typeof schema;
-  Mutators: typeof mutators; // or typeof sync.$mutators if preferred
-};
-```
-
-```ts
-// client.ts
-import type { AppTypes } from '../server/sync.types';
-import { createClient } from 'just-sync';
-
-export const client = createClient<AppTypes>({ baseURL: '/api/sync' });
-```
-Notes:
-- Uses types-only imports, so no server code is bundled.
-- You specify a single generic once; the rest of the client API is fully inferred.
+- Client types are derived automatically from the server `sync` instance (`sync.$types`).
+- In a single-repo setup, no extra steps are needed; the client is fully typed.
+- In a split-repo setup, add a single types-only import file to make `sync.$types` visible to the client TS project (no code generation; no runtime impact).
 
 ```ts
 import { createClient } from 'just-sync';
