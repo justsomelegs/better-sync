@@ -136,5 +136,15 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
     return handler(req);
   });
 
-	return { handler: (req: Request) => fetch(req), fetch, mutators: (config.mutators ?? ({} as TMutators)) } as const;
+  const metricsEndpoint = createEndpoint('/metrics', { method: 'GET' }, async () => {
+    const m = (sse as any).metrics?.();
+    return new Response(JSON.stringify({ sse: m }, null, 2), { headers: { 'Content-Type': 'application/json' } });
+  });
+  const router2 = createRouter({ getEvents, postMutate, postSelect, postMutator, metrics: metricsEndpoint });
+  const handler2 = router2.handler;
+  const fetch2 = withRequestId(async (req: Request): Promise<Response> => {
+    if (extraLatency > 0) await new Promise((r) => setTimeout(r, extraLatency));
+    return handler2(req);
+  });
+  return { handler: (req: Request) => fetch2(req), fetch: fetch2, mutators: (config.mutators ?? ({} as TMutators)) } as const;
 }
