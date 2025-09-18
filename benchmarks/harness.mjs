@@ -40,34 +40,6 @@ const batchSize = Number(process.env.BENCH_BATCH || 50);
 const iterations = Number(process.env.BENCH_ITER || 1);
 const scenariosEnv = (process.env.BENCH_SCENARIOS || 'insert_seq,insert_concurrent,select_window,update_conflict,notify_latency,notify_stress').split(',').map(s => s.trim()).filter(Boolean);
 const outDir = resolve(process.env.BENCH_OUTPUT_DIR || 'benchmarks/results');
-const isWin = process.platform === 'win32';
-const notifyMode = (process.env.BENCH_NOTIFY_MODE || (isWin ? 'poll' : 'sse')) as 'sse'|'poll';
-const NOTIFY_ITER = Number(process.env.BENCH_NOTIFY_ITER || (isWin ? 100 : 2000));
-const NOTIFY_TIMEOUT_MS = Number(process.env.BENCH_NOTIFY_TIMEOUT || (isWin ? 2000 : 5000));
-const POLL_MS = Number(process.env.BENCH_POLL_MS || 250);
-
-function createProgress(total, label) {
-  let last = -1;
-  const started = Date.now();
-  function fmt(ms) { return `${ms}ms`; }
-  function tick(current) {
-    if (total <= 0) return;
-    const pct = Math.floor((current * 100) / total);
-    if (pct !== last) {
-      last = pct;
-      const elapsed = Date.now() - started;
-      const barLen = 20;
-      const filled = Math.floor((pct / 100) * barLen);
-      const bar = `[${'#'.repeat(filled)}${'.'.repeat(Math.max(0, barLen - filled))}]`;
-      process.stdout.write(`\r${label} ${bar} ${pct}% (${current}/${total}) ${fmt(elapsed)}`);
-    }
-  }
-  function done() {
-    const elapsed = Date.now() - started;
-    process.stdout.write(`\r${label} [####################] 100% (${total}/${total}) ${fmt(elapsed)}\n`);
-  }
-  return { tick, done };
-}
 
 function percentile(values, p) {
   if (values.length === 0) return 0;
@@ -98,7 +70,6 @@ async function setupServer() {
 
 async function scenarioInsertSeq(client) {
   const lat = [];
-  const prog = createProgress(rows, 'insert_seq');
   const startCpu = process.cpuUsage();
   const rssStart = process.memoryUsage().rss;
   const started = Date.now();
@@ -107,9 +78,7 @@ async function scenarioInsertSeq(client) {
     // eslint-disable-next-line no-await-in-loop
     await client.insert('bench', { id: `seq-${i}`, k: `k${i}`, v: i });
     lat.push(Date.now() - t0);
-    if ((i & 7) === 0 || i + 1 === rows) prog.tick(i + 1);
   }
-  prog.done();
   const elapsedMs = Date.now() - started;
   const cpu = process.cpuUsage(startCpu);
   const rssEnd = process.memoryUsage().rss;
@@ -119,15 +88,13 @@ async function scenarioInsertSeq(client) {
 async function withConcurrency(limit, tasks) {
   const results = [];
   let next = 0; let active = 0;
-  let completed = 0;
-  const prog = createProgress(tasks.length, 'concurrent');
   return new Promise((resolveAll, rejectAll) => {
     const pump = () => {
       if (next >= tasks.length && active === 0) return resolveAll(results);
       while (active < limit && next < tasks.length) {
         const idx = next++;
         active++;
-        tasks[idx]().then((r) => { results[idx] = r; active--; completed++; if ((completed & 15) === 0 || completed === tasks.length) prog.tick(completed); pump(); }).catch((e) => { results[idx] = { error: String(e?.message || e) }; active--; completed++; if ((completed & 15) === 0 || completed === tasks.length) prog.tick(completed); pump(); });
+        tasks[idx]().then((r) => { results[idx] = r; active--; pump(); }).catch((e) => { results[idx] = { error: String(e?.message || e) }; active--; pump(); });
       }
     };
     pump();
@@ -329,8 +296,8 @@ async function scenarioMixedBatch(client) {
 }
 
 async function scenarioNotifyLatency(baseURL) {
-  const clientA = createClient({ baseURL, realtime: notifyMode, pollIntervalMs: notifyMode === 'poll' ? POLL_MS : undefined, defaults: { microBatchEnabled: false } });
-  const clientB = createClient({ baseURL, realtime: notifyMode, pollIntervalMs: notifyMode === 'poll' ? POLL_MS : undefined, defaults: { microBatchEnabled: false } });
+  const clientA = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
+  const clientB = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
   // Prime
   await clientA.insert('bench', { id: `n-seed`, k: 'seed', v: 0 }).catch(() => {});
   await clientA.select({ table: 'bench', limit: 1 });
@@ -343,32 +310,26 @@ async function scenarioNotifyLatency(baseURL) {
       if (resolver) resolver();
     }
   }, { initialSnapshot: false, debounceMs: 10 });
-  const totalIter = Math.min(rows, NOTIFY_ITER);
-  const prog = createProgress(totalIter, `notify_latency(${notifyMode})`);
-  for (let i = 0; i < totalIter; i++) {
+  for (let i = 0; i < Math.min(rows, 2000); i++) {
     // eslint-disable-next-line no-await-in-loop
-    const p = new Promise((res, rej) => { resolver = res; setTimeout(() => rej(new Error('timeout')), NOTIFY_TIMEOUT_MS); });
+    const p = new Promise((res, rej) => { resolver = res; setTimeout(() => rej(new Error('timeout')), 5000); });
     const t0 = Date.now();
     // eslint-disable-next-line no-await-in-loop
     await clientA.insert('bench', { id: `n-${i}-${Math.random().toString(36).slice(2)}`, k: 'n', v: i }).catch(() => {});
     try { // eslint-disable-next-line no-await-in-loop
       await p; lat.push(Date.now() - t0);
-    } catch {
-      process.stdout.write(`\rnotify_latency timeout @${i + 1}/${totalIter}\n`);
-    }
+    } catch {}
     finally { resolver = null; }
     // eslint-disable-next-line no-await-in-loop
     await new Promise((r) => setTimeout(r, 2));
-    if ((i & 7) === 0 || i + 1 === totalIter) prog.tick(i + 1);
   }
-  prog.done();
   stop();
   return { ops: lat.length, elapsedMs: lat.reduce((a, b) => a + b, 0), latencies: summarizeLatencies(lat), throughput: lat.length / ((lat.reduce((a, b) => a + b, 0) || 1) / 1000) };
 }
 
 async function scenarioNotifyStress(baseURL) {
   const clientA = createClient({ baseURL, realtime: 'off', defaults: { microBatchEnabled: false } });
-  const clientB = createClient({ baseURL, realtime: notifyMode, pollIntervalMs: notifyMode === 'poll' ? POLL_MS : undefined, defaults: { microBatchEnabled: false } });
+  const clientB = createClient({ baseURL, realtime: 'sse', defaults: { microBatchEnabled: false } });
   // warmup
   await clientA.insert('bench', { id: `ns-seed`, k: 'seed', v: 0 }).catch(() => {});
   await clientB.select({ table: 'bench', limit: 1 });

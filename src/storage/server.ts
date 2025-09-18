@@ -28,7 +28,7 @@ export function sqliteAdapter(_config: { url: string; asyncFlush?: boolean; flus
   const ensuredMinimal = new Set<string>();
   let dirtySinceExport = false;
   const ensureIndex = new Set<string>();
-  const asyncFlush = !!_config.asyncFlush;
+  const asyncFlush = _config.asyncFlush != null ? !!_config.asyncFlush : !!filePath;
   const flushMs = typeof _config.flushMs === 'number' ? Math.max(1, _config.flushMs) : 5;
   let flushTimer: NodeJS.Timeout | null = null;
   // Prepared statement simple pool keyed by SQL

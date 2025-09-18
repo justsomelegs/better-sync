@@ -6,22 +6,20 @@ export function createSseStream(config?: SseConfig) {
 	const RECOVER = encoder.encode('event: recover\ndata: {}\n\n');
 	const subscribers = new Set<(frame: Uint8Array) => void>();
 	const ring: { id: string; frame: Uint8Array; ts: number }[] = [];
-	const metrics = { emitted: 0, prunedExpired: 0, prunedCap: 0, subscribers: 0, lastEmitTs: 0 };
 
 	function pruneRing(now: number, bufferMs: number, cap: number) {
 		while (ring.length > 0) {
 			const first = ring[0];
 			if (!first) break;
-			if (now - first.ts > bufferMs) { ring.shift(); metrics.prunedExpired++; } else break;
+			if (now - first.ts > bufferMs) ring.shift(); else break;
 		}
-		while (ring.length > cap) { ring.shift(); metrics.prunedCap++; }
+		while (ring.length > cap) ring.shift();
 	}
 
 	function emit(frame: string, id: string, bufferMs: number, cap: number) {
 		const bytes = encoder.encode(frame);
 		ring.push({ id, frame: bytes, ts: Date.now() });
 		pruneRing(Date.now(), bufferMs, cap);
-		metrics.emitted++; metrics.lastEmitTs = Date.now(); metrics.subscribers = subscribers.size;
 		for (const send of subscribers) { try { send(bytes); } catch { } }
 	}
 
@@ -70,10 +68,6 @@ export function createSseStream(config?: SseConfig) {
     return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' } });
 	}
 
-	function snapshotMetrics() {
-		return { ...metrics, ringSize: ring.length };
-	}
-
-	return { emit, handler, ring, subscribers, metrics: snapshotMetrics } as const;
+	return { emit, handler, ring, subscribers } as const;
 }
 

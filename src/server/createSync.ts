@@ -127,24 +127,9 @@ export function createSync<TMutators extends ServerMutatorsSpec = {}>(config: { 
 
 	const router = createRouter({ getEvents, postMutate, postSelect, postMutator });
 
-  const handler = router.handler;
-  // Optional artificial latency for harness (ignored if not set)
-  const extraLatency = Number((process as any).env?.BENCH_LATENCY_MS || 0);
+	const handler = router.handler;
 
-  const fetch = withRequestId(async (req: Request): Promise<Response> => {
-    if (extraLatency > 0) await new Promise((r) => setTimeout(r, extraLatency));
-    return handler(req);
-  });
+	const fetch = withRequestId(async (req: Request): Promise<Response> => handler(req));
 
-  const metricsEndpoint = createEndpoint('/metrics', { method: 'GET' }, async () => {
-    const m = (sse as any).metrics?.();
-    return new Response(JSON.stringify({ sse: m }, null, 2), { headers: { 'Content-Type': 'application/json' } });
-  });
-  const router2 = createRouter({ getEvents, postMutate, postSelect, postMutator, metrics: metricsEndpoint });
-  const handler2 = router2.handler;
-  const fetch2 = withRequestId(async (req: Request): Promise<Response> => {
-    if (extraLatency > 0) await new Promise((r) => setTimeout(r, extraLatency));
-    return handler2(req);
-  });
-  return { handler: (req: Request) => fetch2(req), fetch: fetch2, mutators: (config.mutators ?? ({} as TMutators)) } as const;
+	return { handler: (req: Request) => fetch(req), fetch, mutators: (config.mutators ?? ({} as TMutators)) } as const;
 }

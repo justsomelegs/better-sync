@@ -25,25 +25,16 @@ type RealtimeMode = 'sse' | 'poll' | 'off';
 export function createClient<_TApp = unknown, TServerMutators extends ServerMutatorsSpec = {}>(config: { baseURL: string; fetch?: typeof fetch; datastore?: LocalStore | Promise<LocalStore>; mutators?: TServerMutators; realtime?: RealtimeMode; pollIntervalMs?: number; defaults?: { debounceMs?: number; pageLimit?: number }; hooks?: { onError?: (e: unknown) => void; onRetry?: (info: { attempt: number; reason: unknown }) => void }; debug?: boolean; reconnectBackoff?: { baseMs?: number; maxMs?: number; jitterMs?: number } }) {
   const baseURL = config.baseURL.replace(/\/$/, '');
   const fetchImpl = config.fetch ?? fetch;
-  // Node: set a global undici dispatcher (Agent with per-origin pools) to enforce keep-alive without user config
+  // Node: attach keep-alive agent by default for HTTP/HTTPS to reuse sockets
+  let agent: any = undefined;
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const undici = require('undici');
-    if (!(globalThis as any).__just_sync_undici_global__) {
-      const Agent = undici.Agent;
-      const agent = new Agent({
-        keepAliveTimeout: 60_000,
-        keepAliveMaxTimeout: 60_000,
-        connections: 256,
-        // For each origin, create a Pool with our settings
-        factory(origin: string, opts: any) {
-          const Pool = undici.Pool;
-          return new Pool(origin, { connections: 256, pipelining: 1, keepAliveTimeout: 60_000, ...opts });
-        }
-      });
-      if (typeof undici.setGlobalDispatcher === 'function') undici.setGlobalDispatcher(agent);
-      (globalThis as any).__just_sync_undici_global__ = true;
-    }
+    const http = require('node:http');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const https = require('node:https');
+    const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 256 });
+    const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 256 });
+    agent = { http: httpAgent, https: httpsAgent };
   } catch {}
   const realtimeMode: RealtimeMode = config.realtime ?? 'sse';
   const pollIntervalMs = config.pollIntervalMs ?? 1500;
@@ -73,16 +64,11 @@ export function createClient<_TApp = unknown, TServerMutators extends ServerMuta
   async function postJson(path: string, body: unknown) {
     const url = `${baseURL}${path}`;
     const started = Date.now();
-    const ac = new AbortController();
-    const timeoutMs = 15000;
-    const t = setTimeout(() => { try { ac.abort(); } catch {} }, timeoutMs);
     const res = await fetchImpl(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: ac.signal
-    });
-    clearTimeout(t);
+      body: JSON.stringify(body)
+    , ...(agent ? { agent: (parsed => (parsed.protocol === 'http:' ? agent.http : agent.https))(new URL(url)) } : {}) });
     if (debug) {
       try { console.debug('[just-sync] POST', path, res.status, `${Date.now() - started}ms`); } catch {}
     }

@@ -155,7 +155,7 @@ export function buildPostMutate(deps: {
                     if (r.id && typeof r.version === 'number') rowVersions[r.id] = r.version as number;
                     if (r.id) diffs[String(r.id)] = { set: r as any };
                 }
-                emit('mutation', { txId, tables: [{ name: body.table, pks: pks, rowVersions, diffs }] });
+                emit('mutation', { txId, t: [{ n: body.table, p: pks, v: rowVersions, d: diffs }] });
             } else if (body.op === 'update') {
                 const rid = (result as any).row?.id ?? canonicalPkValue(body.pk as PrimaryKey);
                 const rv: Record<string, number> = {};
@@ -169,9 +169,9 @@ export function buildPostMutate(deps: {
                 if (typeof ver === 'number') setFields['version'] = ver;
                 const diffs: Record<string, { set?: Record<string, unknown>; unset?: string[] }> = {};
                 if (rid) diffs[String(rid)] = { set: setFields };
-                emit('mutation', { txId, tables: [{ name: body.table, pks: [rid], rowVersions: rv, diffs }] });
+                emit('mutation', { txId, t: [{ n: body.table, p: [rid], v: rv, d: diffs }] });
             } else if (body.op === 'delete') {
-                emit('mutation', { txId, tables: [{ name: body.table, pks: [typeof body.pk === 'object' ? canonicalPkValue(body.pk as PrimaryKey) : body.pk] }] });
+                emit('mutation', { txId, t: [{ n: body.table, p: [typeof body.pk === 'object' ? canonicalPkValue(body.pk as PrimaryKey) : body.pk] }] });
             }
 			await Promise.resolve(idem.set(opId, result));
 			return result as any;
