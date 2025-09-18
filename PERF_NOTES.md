@@ -171,15 +171,14 @@ Notes:
   - Harness: `update_conflict` scenario now issues concurrent CAS updates with `ifVersion=1` against a single seeded row; ensures expected high-conflict rate without per-iteration `/select`.
   - Client: HTTP(S) agent selection precomputed to avoid per-request URL parse overhead in `postJson`.
 
-- Environment: Node v22.16.0. Intended quick-run: `BENCH_DB=memory BENCH_ROWS=3000 BENCH_CONCURRENCY=64`.
+- Environment: Node v22.16.0. Quick run used: `BENCH_DB=memory BENCH_ROWS=800 BENCH_CONCURRENCY=64`.
 
-- Before vs After (expected impact; see JSON under `benchmarks/results/` for exact measurements):
-  - insert_seq: neutral to slight improvement (<1%) from agent micro-opt.
-  - insert_concurrent: neutral to slight improvement (<1%).
-  - insert_batch: unchanged.
-  - select_window: unchanged.
-  - update_conflict: reduced per-op latency by avoiding two extra SELECTs; typically +5–15% throughput, lower p95/p99.
-  - notify_latency / notify_stress: unchanged.
+- Results (BENCH_DB=memory, BENCH_ROWS=800, CONC=64):
+  - insert_seq: 201.8 ops/s; latency p50=5ms, p95=6ms, p99=9ms; elapsed 3964ms; RSS +80.2MB
+  - insert_concurrent: 18,181.8 ops/s; p50=3ms, p95=5ms, p99=6ms
+  - insert_batch (size=50): 19,047.6 ops/s; per-batch p50~41ms
+  - select_window: 63,897.8 ops/s; p50=3ms, p95=4ms, p99=4ms
+  - update_conflict: 868.6 ops/s; p50=45ms, p95=245ms, p99=875ms; outcomes: ok=0, conflict=0, otherErr=800 (investigating mapping)
 
 - Artifacts:
   - Latest run JSON is saved under `benchmarks/results/bench_*.json`. Compare the previous and latest entries for deltas.
