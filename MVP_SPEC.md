@@ -16,11 +16,11 @@ export const schema = {
 2) Mount the server handler
 ```ts
 // server.ts
-import { createSync } from 'just-sync';
-import { sqliteAdapter } from 'just-sync/storage/server';
+import { createSyncEngine } from 'just-sync';
+import { sqliteNode } from 'just-sync/storage/sqlite-node';
 import { schema } from './schema';
 
-export const sync = createSync({ schema, database: sqliteAdapter({ url: 'file:./app.db' }) });
+export const sync = createSyncEngine({ schema, adapter: sqliteNode({ url: 'file:./app.db' }), mode: 'sse' });
 export const handler = sync.handler; // Mount in your framework
 ```
 
@@ -43,9 +43,9 @@ That’s it. No routing, no cache setup, no manual optimistic code.
 - **Type-safe sync engine for TypeScript** with excellent DX, inspired by Better Auth’s extensibility and simplicity.
 - **Environment-agnostic**: serverless/ephemeral friendly, Node, edge runtimes, browsers.
 - **SQLite-first MVP**: minimal infra, predictable behavior.
-- **Realtime by default**: SSE for updates, HTTP POST for mutations; fall back to HTTP polling only if SSE is unavailable.
-- **Bring Your Own Schema**: accept plain Zod/ArkType/TS types; no custom DSL/helpers.
-- **Zero user routing**: endpoints internally powered (Better Call under the hood), devs only mount a handler.
+- **Realtime by default (SSE-first)**: SSE for updates; polling is opt-in via modes (`'sse' | 'sse-poll-fallback' | 'poll'`).
+- **Bring Your Own Schema**: first-class Standard Schema support; also accepts Zod/Valibot/ArkType/TypeBox/Yup without user adapters, and plain TS-only objects.
+- **Zero user routing**: a single handler is mounted; transport details are internal.
 
 ### Non-Goals (MVP)
 - No DB triggers or CDC/scanning for external writers. MVP observes only writes performed through our API.
