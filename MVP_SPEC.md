@@ -49,30 +49,28 @@ That’s it. No routing, no cache setup, no manual optimistic code.
 
 ### Non-Goals (MVP)
 - No DB triggers or CDC/scanning for external writers. MVP observes only writes performed through our API.
-- No auth/authorize pipeline in MVP (will be added later without breaking API).
+- No built-in auth provider in MVP. Provider-agnostic hooks are available and optional; users bring their own auth (Better Auth, Supabase, Clerk, custom).
 - No query DSL or server-side filter push-down beyond basic shapes (predicate runs client-side in MVP).
-- No additional ORMs beyond schema compatibility.
+- No additional ORMs in core; remote SQLite ORM adapters land post‑MVP.
 
 ---
 
 ## Architecture Snapshot (MVP)
-- **Server**: `createSync({ schema, database })` where database is a SQLite adapter. Server is authoritative for `id` and `updatedAt`.
-- **Transport**: Internally uses Better Call to expose `GET /events` (SSE), `POST /mutate`, `POST /select`. Developer mounts a single exported handler for their framework.
-- **Client**: `createClient({ baseURL, realtime?: 'sse' | 'poll' | 'off', pollIntervalMs? })`. Defaults to SSE realtime; silently falls back to polling if needed.
+- **Server**: `createSyncEngine({ schema, adapter, mode })`. Server is authoritative for `id` and per-row `version` (ordering/conflicts). `updatedAt` is for UX only.
+- **Transport**: Internal unified handler exposes `GET /events` (SSE), `GET /changes` (pull), `POST /mutate`, `POST /select`. Developer mounts a single handler for their framework.
+- **Client**: `createClient({ baseURL, mode?: 'sse' | 'sse-poll-fallback' | 'poll', pollIntervalMs? })`. Default `mode: 'sse'`; polling is used only if explicitly configured.
 - **Client state**: Local-first optimistic cache applies writes immediately; reconciles on server acknowledgment; rolls back on error. Inserts use temporary IDs remapped to server ULIDs.
-- **Realtime resume**: SSE events include monotonic event IDs and support resuming via `Last-Event-ID` (or `?since=`). Server maintains a small in-memory ring buffer for gapless reconnects.
-- **Change propagation**: On successful server mutations (via our API), the server emits an SSE event. Subscribed clients refresh affected data immediately. No background scanners/triggers in MVP.
+- **Realtime resume**: SSE events include monotonic event IDs and support resuming via `Last-Event-ID`. The server tails a DB-backed `_sync_outbox`; if retention is exceeded, the client performs a fresh snapshot.
+- **Change propagation**: On successful mutations, the server appends to `_sync_outbox` in the same transaction and emits SSE. Subscribed clients refresh affected data immediately. No DB triggers/CDC in MVP.
 
 ---
 
 ## Schema Model (BYO)
 
 Core Concepts:
-- Plain object schema. Zod adds runtime validation; TS-only gives types without validation.
-- Defaults: `id` primary key, `updatedAt` timestamp; override per table if needed.
-- Single object keyed by collection/table name.
-- Accepts Zod/ArkType validators or TS-only types.
-- Defaults: `primaryKey = ['id']`, `updatedAt = 'updatedAt'`.
+- Single plain object keyed by table name.
+- Standard Schema first-class: accepts Standard Schema objects directly, and popular validators (Zod/Valibot/ArkType/TypeBox/Yup) without user adapters. TS-only objects are also accepted (types-only, no runtime validation).
+- Defaults: `primaryKey = ['id']`, `updatedAt = 'updatedAt'` (for UX); server-assigned `version` is authoritative for ordering/conflicts.
 - Inline overrides allowed per table when DB names differ.
 
 Examples:
