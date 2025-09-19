@@ -1,8 +1,8 @@
 import { coreMigrations, applyMigrations } from './migrations.mjs';
 
 async function createSyncEngine(options) {
-  const { adapter, migrations = [] } = options;
-  const db = adapter.session();
+  const { database, migrations = [] } = options;
+  const db = database.session();
   const allMigrations = [...coreMigrations(), ...migrations];
   await applyMigrations(db, allMigrations);
   return {
@@ -19,6 +19,9 @@ async function createSyncEngine(options) {
       return row?.n ?? 0;
     },
     async dispose() {
+    },
+    async mutate() {
+      throw new Error("mutate() not implemented yet (will be added in Step 2)");
     }
   };
 }

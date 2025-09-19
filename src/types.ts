@@ -73,7 +73,7 @@ export interface Migration {
  */
 export interface CreateSyncEngineOptions {
   /** Database adapter provided by the application. */
-  readonly adapter: DatabaseAdapter;
+  readonly database: DatabaseAdapter;
   /** Additional app-specific migrations to run after the core set. */
   readonly migrations?: readonly Migration[];
 }
@@ -96,6 +96,11 @@ export interface SyncEngine {
    * Dispose of resources. For BYO DB, this is a no-op.
    */
   dispose(): Promise<void>;
+
+  /**
+   * Apply one or more mutations transactionally with durable versioning.
+   */
+  mutate(mutations: readonly MutationInput[]): Promise<MutationResult[]>;
 }
 
 /** Allowed mutation operations. */

@@ -97,17 +97,18 @@ export class SQLJsAdapter implements DatabaseAdapter {
   public readonly dialect: Dialect = 'sqlite';
   private readonly executor: SQLJsExecutor;
 
-  private constructor(executor: SQLJsExecutor) {
+  constructor(executor: SQLJsExecutor) {
     this.executor = executor;
-  }
-
-  static async create(): Promise<SQLJsAdapter> {
-    const exec = await SQLJsExecutor.create();
-    return new SQLJsAdapter(exec);
   }
 
   session(): DatabaseExecutor {
     return this.executor;
   }
+}
+
+/** Factory function to create a sqlite adapter from an existing sql.js Database. */
+export function sqliteAdapter(options: { db: SQLJSDatabase }): DatabaseAdapter {
+  const exec = new SQLJsExecutor(options.db);
+  return new SQLJsAdapter(exec);
 }
 

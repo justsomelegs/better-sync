@@ -11,8 +11,8 @@ import { applyMigrations, coreMigrations } from './migrations';
  * @returns A SyncEngine instance with basic schema/migration helpers.
  */
 export async function createSyncEngine(options: CreateSyncEngineOptions): Promise<SyncEngine> {
-  const { adapter, migrations = [] } = options;
-  const db = adapter.session();
+  const { database, migrations = [] } = options;
+  const db = database.session();
   const allMigrations = [...coreMigrations(), ...migrations];
   await applyMigrations(db, allMigrations);
 
@@ -31,6 +31,9 @@ export async function createSyncEngine(options: CreateSyncEngineOptions): Promis
     },
     async dispose() {
       // BYO DB: nothing to dispose
+    },
+    async mutate() {
+      throw new Error('mutate() not implemented yet (will be added in Step 2)');
     },
   };
 }

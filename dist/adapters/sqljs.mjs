@@ -81,13 +81,13 @@ class SQLJsAdapter {
     __publicField(this, "executor");
     this.executor = executor;
   }
-  static async create() {
-    const exec = await SQLJsExecutor.create();
-    return new SQLJsAdapter(exec);
-  }
   session() {
     return this.executor;
   }
 }
+function sqliteAdapter(options) {
+  const exec = new SQLJsExecutor(options.db);
+  return new SQLJsAdapter(exec);
+}
 
-export { SQLJsAdapter, SQLJsExecutor };
+export { SQLJsAdapter, SQLJsExecutor, sqliteAdapter };

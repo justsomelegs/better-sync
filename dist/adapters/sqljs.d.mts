@@ -1,3 +1,4 @@
+import { Database } from 'sql.js';
 import { DatabaseExecutor, Dialect, DatabaseAdapter } from '../types.mjs';
 
 /**
@@ -21,9 +22,12 @@ declare class SQLJsExecutor implements DatabaseExecutor {
 declare class SQLJsAdapter implements DatabaseAdapter {
     readonly dialect: Dialect;
     private readonly executor;
-    private constructor();
-    static create(): Promise<SQLJsAdapter>;
+    constructor(executor: SQLJsExecutor);
     session(): DatabaseExecutor;
 }
+/** Factory function to create a sqlite adapter from an existing sql.js Database. */
+declare function sqliteAdapter(options: {
+    db: Database;
+}): DatabaseAdapter;
 
-export { SQLJsAdapter, SQLJsExecutor };
+export { SQLJsAdapter, SQLJsExecutor, sqliteAdapter };
