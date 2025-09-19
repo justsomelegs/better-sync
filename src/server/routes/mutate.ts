@@ -62,9 +62,14 @@ export function buildPostMutate(deps: {
 							const parsed = (tableSchema.partial() as unknown as z.ZodTypeAny).safeParse(sub.set);
 							if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 						}
+					let nextVersion: number;
+					if (typeof sub.ifVersion === 'number') {
+						nextVersion = sub.ifVersion + 1;
+					} else {
 						const existing = await db.selectByPk(sub.table, sub.pk as PrimaryKey);
-						const nextVersion = (existing as any)?.version ? Number((existing as any).version) + 1 : 1;
-						const row = await db.updateByPk(sub.table, sub.pk as PrimaryKey, { ...sub.set, [getUpdatedAtField(sub.table)]: now, version: nextVersion }, { ifVersion: sub.ifVersion });
+						nextVersion = (existing as any)?.version ? Number((existing as any).version) + 1 : 1;
+					}
+					const row = await db.updateByPk(sub.table, sub.pk as PrimaryKey, { ...sub.set, [getUpdatedAtField(sub.table)]: now, version: nextVersion }, { ifVersion: sub.ifVersion });
 						results.push({ row });
 					} else if (sub.op === 'delete') {
 						results.push(await db.deleteByPk(sub.table, sub.pk as PrimaryKey));
@@ -107,8 +112,13 @@ export function buildPostMutate(deps: {
 					const parsed = (tableSchema.partial() as unknown as z.ZodTypeAny).safeParse(body.set);
 					if (!parsed.success) { throw new SyncError('BAD_REQUEST', 'Validation failed', parsed.error.issues); }
 				}
-				const existing = await db.selectByPk(body.table, body.pk as PrimaryKey);
-				const nextVersion = (existing as any)?.version ? Number((existing as any).version) + 1 : 1;
+				let nextVersion: number;
+				if (typeof body.ifVersion === 'number') {
+					nextVersion = body.ifVersion + 1;
+				} else {
+					const existing = await db.selectByPk(body.table, body.pk as PrimaryKey);
+					nextVersion = (existing as any)?.version ? Number((existing as any).version) + 1 : 1;
+				}
 				const row = await db.updateByPk(body.table, body.pk as PrimaryKey, { ...body.set, [getUpdatedAtField(body.table)]: now, version: nextVersion }, { ifVersion: body.ifVersion });
 				result = { row };
 			}
