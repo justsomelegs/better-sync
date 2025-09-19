@@ -1,0 +1,47 @@
+{
+  "name": "new-mvp-sync-engine",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TypeScript-only, serverless-ready sync engine (bring-your-own-database)",
+  "main": "dist/index.mjs",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs"
+    }
+  },
+  "scripts": {
+    "build": "unbuild",
+    "test": "vitest run",
+    "dev:test": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "example": "tsx examples/basic.ts"
+  },
+  "keywords": [
+    "sync",
+    "serverless",
+    "sqlite",
+    "postgres",
+    "typescript"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "typescript": "^5.5.4",
+    "unbuild": "^2.0.0",
+    "vitest": "^2.0.5",
+    "tsx": "^4.19.0"
+  },
+  "dependencies": {
+    "sql.js": "^1.9.0"
+  },
+  "pnpm": {
+    "packageManager": "pnpm@9"
+  }
+}
+
