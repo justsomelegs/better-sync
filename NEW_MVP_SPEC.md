@@ -177,6 +177,31 @@ GET /changes?since=01J9Y0...
 {"events":[{"eventId":"01J9Y0...","table":"todos","pk":"t1","version":1013,"diff":{"set":{"done":true}}}],"hwm":"01J9Y0..."}
 ```
 
+```http
+POST /select
+Content-Type: application/json
+{
+  "table": "todos",
+  "where": null,
+  "select": ["id","title","done","updatedAt"],
+  "orderBy": { "updatedAt": "desc" },
+  "limit": 50,
+  "cursor": null
+}
+
+200 OK
+{ "data": [ ... ], "nextCursor": "opaque" }
+```
+
+```http
+POST /mutators/addTodo
+Content-Type: application/json
+{ "args": { "title": "Buy milk" }, "clientOpId": "uuid-..." }
+
+200 OK
+{ "result": { "id": "t1", "title": "Buy milk", "done": false, "updatedAt": 1726, "version": 1001 } }
+```
+
 ---
 
 ## Client API
@@ -211,6 +236,7 @@ Default mode is `sse` (no polling). Each event has a monotonic `id` (ULID). The 
 - External writers: not observed in MVP; post‑MVP adds CDC/triggers.
 
 Defaults:
+- Headers: Request `Last-Event-ID` for resume; Response `Content-Type: text/event-stream`, `Cache-Control: no-cache`.
 - Keepalive: send `:keepalive` every 15s.
 - Backoff: client exponential backoff (base ~500 ms, max ~5 s).
 - Frame caps: server caps bytes per message and pages outbox reads.
@@ -284,6 +310,15 @@ Examples:
 - Defaults: `limit` default 100, max 1000 (clamped); `orderBy` default `{ updatedAt: 'desc' }`.
 - Cursor: opaque; encodes last ordering keys; stable for same `{ table, orderBy }`.
 
+Tie-breakers and canonicalization:
+- Always include `id` as the final tie-breaker after `updatedAt` and/or `version`.
+- Composite PK canonicalization in internal maps: for `primaryKey: ['workspaceId','id']`, pk `{ workspaceId: 'w1', id: 't1' }` → canonical `"workspaceId=w1|id=t1"`.
+
+Operational limits (defaults):
+- Max payload size: 1 MB
+- Max batch size for mutations: 100 rows
+- Handler timeouts: ~10 s per request (environment-dependent)
+
 ---
 
 ## Mutation Semantics & Idempotency
@@ -291,6 +326,11 @@ Examples:
 - Mutations run in a DB transaction: assign/normalize `id`, stamp `updatedAt`, assign `version`, upsert `_sync_versions`, append `_sync_outbox`.
 - Idempotency: clients send `clientOpId`; server dedupes using `_sync_ops` (`${clientId}:${clientOpId}`), TTL default 10 minutes.
 - Bulk ops by where: client resolves PKs via select, then server updates/deletes by PK.
+
+SQLite error mapping guidance (illustrative):
+- Unique constraint violation → `CONFLICT` with `details: { constraint: 'unique', column?: string }` when determinable.
+- Invalid payload/validation failures → `BAD_REQUEST` with per-field details when available.
+- Unexpected/internal errors → `INTERNAL` and include `{ requestId }` if present.
 
 ---
 
@@ -315,6 +355,36 @@ Payload example:
 ```
 
 Diff semantics: shallow top-level; arrays replace wholesale; if a diff cannot be expressed, omit and let the client reselect.
+
+Implementer interfaces (MVP):
+```ts
+export type PrimaryKey = string | number | Record<string, string | number>;
+
+export interface DatabaseAdapter {
+  begin(): Promise<void>;
+  commit(): Promise<void>;
+  rollback(): Promise<void>;
+  insert(table: string, row: Record<string, unknown>): Promise<Record<string, unknown>>;
+  updateByPk(table: string, pk: PrimaryKey, set: Record<string, unknown>, opts?: { ifVersion?: number }): Promise<Record<string, unknown>>;
+  deleteByPk(table: string, pk: PrimaryKey): Promise<{ ok: true }>;
+  selectByPk(table: string, pk: PrimaryKey, select?: string[]): Promise<Record<string, unknown> | null>;
+  selectWindow(table: string, req: { select?: string[]; orderBy?: Record<string,'asc'|'desc'>; limit?: number; cursor?: string | null; where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
+}
+
+export interface ClientDatastore {
+  apply(table: string, pk: PrimaryKey, diff: { set?: Record<string, unknown>; unset?: string[] }): Promise<void>;
+  reconcile(table: string, pk: PrimaryKey, row: Record<string, unknown> & { version: number }): Promise<void>;
+  readByPk(table: string, pk: PrimaryKey, select?: string[]): Promise<Record<string, unknown> | null>;
+  readWindow(table: string, req: { select?: string[]; orderBy?: Record<string,'asc'|'desc'>; limit?: number; cursor?: string | null; where?: unknown }): Promise<{ data: Record<string, unknown>[]; nextCursor?: string | null }>;
+}
+
+export interface IdempotencyStore {
+  get(key: string): Promise<{ status: 'hit'; response: unknown } | { status: 'miss' }>;
+  set(key: string, response: unknown, ttlMs: number): Promise<void>;
+  acquire?(key: string, ttlMs: number): Promise<{ ok: true } | { ok: false }>;
+  release?(key: string): Promise<void>;
+}
+```
 
 ---
 
@@ -368,4 +438,50 @@ Behavior:
 - Errors: standardized JSON codes
 - CLI: schema generation and checks; user applies migrations
 - Out-of-scope: external write capture, advanced queries, built-in auth provider
+
+---
+
+## Observability & Example
+
+- Observability:
+  - Minimal server logs with request summary and mutation summaries
+  - `X-Request-Id` echo; include in error `details` when present
+  - Basic counters/timers for latency and SSE lag
+
+Example: Svelte usage with `.watch`
+```ts
+// lib/syncClient.ts
+import { createClient } from 'just-sync';
+export const client = createClient({ baseURL: '/api/sync', mode: 'sse' });
+```
+
+```svelte
+<!-- routes/TodosList.svelte -->
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { writable } from 'svelte/store';
+  import { client } from '$lib/syncClient';
+
+  type Todo = typeof client.todos.$infer;
+  const todos = writable<Todo[]>([]);
+  let sub: { unsubscribe: () => void } | null = null;
+
+  onMount(() => {
+    sub = client.todos.watch(
+      { where: ({ done }) => !done, select: ['id','title'], orderBy: { updatedAt: 'desc' }, limit: 50 },
+      ({ data }) => todos.set(data)
+    );
+    return () => sub?.unsubscribe();
+  });
+</script>
+
+<ul>
+  {#each $todos as t}
+    <li>{t.title}</li>
+  {/each}
+  {#if !$todos.length}
+    <li>Loading…</li>
+  {/if}
+</ul>
+```
 
