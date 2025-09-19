@@ -1,0 +1,31 @@
+{
+  "meta": {
+    "rows": 1000,
+    "concurrency": 32,
+    "iterations": 1,
+    "node": "v22.16.0",
+    "date": "2025-09-19T19:15:02.706Z"
+  },
+  "scenarios": {
+    "notify_latency": {
+      "skipped": true,
+      "reason": "timeout",
+      "elapsedMs": 30000
+    },
+    "notify_stress": {
+      "events": 0,
+      "produced": 1000,
+      "elapsedMs": 1944,
+      "throughput": 0,
+      "cpu": {
+        "user": 2341532,
+        "system": 157676
+      },
+      "memory": {
+        "rssStart": 82460672,
+        "rssEnd": 176123904,
+        "delta": 93663232
+      }
+    }
+  }
+}
