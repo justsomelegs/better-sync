@@ -92,6 +92,30 @@ function coreMigrations() {
       }
     }
   });
+  m.push({
+    id: "004_idempotency",
+    up: (db) => {
+      if (db.dialect === "sqlite") {
+        db.run(
+          `CREATE TABLE IF NOT EXISTS _sync_idempotency (
+            key TEXT PRIMARY KEY,
+            result TEXT,
+            version INTEGER,
+            ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+          )`
+        );
+      } else {
+        db.run(
+          `CREATE TABLE IF NOT EXISTS _sync_idempotency (
+            key TEXT PRIMARY KEY,
+            result JSONB,
+            version BIGINT,
+            ts TIMESTAMPTZ NOT NULL DEFAULT NOW()
+          )`
+        );
+      }
+    }
+  });
   return m;
 }
 async function applyMigrations(db, migrations) {

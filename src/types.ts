@@ -125,6 +125,8 @@ export interface MutationInput<TPayload = Record<string, unknown>> {
   clientVersion: number;
   /** Optional payload to record in the change log. */
   payload?: TPayload;
+  /** Optional idempotency key to make retries safe. */
+  idempotencyKey?: string;
 }
 
 /** Result for a single mutation. */

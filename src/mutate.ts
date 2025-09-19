@@ -1,4 +1,5 @@
 import type { DatabaseExecutor, MutationInput, MutationResult } from './types';
+import { shouldApplyMutation } from './conflicts';
 
 function ensureNamespaceTable(db: DatabaseExecutor, namespace: string) {
   if (db.dialect === 'sqlite') {
@@ -116,22 +117,50 @@ export async function applyMutations(
   const results: MutationResult[] = [];
   await db.transaction(async (tx) => {
     for (const m of mutations) {
+      // Idempotency shortcut per-mutation
+      if (m.idempotencyKey) {
+        const existing = await tx.get<{ result: string | null; version: number | null }>(
+          `SELECT result, version FROM _sync_idempotency WHERE key = ${tx.dialect === 'sqlite' ? '?' : '$1'}`,
+          [m.idempotencyKey],
+        );
+        if (existing) {
+          const parsed = existing.result ? JSON.parse(existing.result) : undefined;
+          results.push(parsed as MutationResult);
+          continue;
+        }
+      }
+
       const clock = await tx.get<{ server_version: number }>(
         `SELECT server_version FROM _sync_clock WHERE namespace = ${tx.dialect === 'sqlite' ? '?' : '$1'} AND record_id = ${tx.dialect === 'sqlite' ? '?' : '$2'}`,
         [m.namespace, m.recordId],
       );
       const current = clock?.server_version ?? 0;
-      if (current !== m.clientVersion) {
+      const decision = shouldApplyMutation(current, m);
+      if (!decision.apply) {
         // conflict: server wins, record intent as a change for audit
         insertChange(tx, m.namespace, m.recordId, current, 'update', m.payload ?? null);
-        results.push({ applied: false, serverVersion: current, conflict: { reason: 'version_mismatch', serverVersion: current } });
+        const conflictResult: MutationResult = { applied: false, serverVersion: current, conflict: { reason: decision.reason ?? 'conflict', serverVersion: current } };
+        if (m.idempotencyKey) {
+          tx.run(
+            `INSERT INTO _sync_idempotency(key, result, version) VALUES (${tx.dialect === 'sqlite' ? '?, ?, ?' : '$1, $2, $3'})`,
+            [m.idempotencyKey, JSON.stringify(conflictResult), current],
+          );
+        }
+        results.push(conflictResult);
         continue;
       }
       const nextVersion = await getNextGlobalVersion(tx);
       insertChange(tx, m.namespace, m.recordId, nextVersion, m.op, m.payload ?? null);
       upsertClock(tx, m.namespace, m.recordId, nextVersion);
       applyToNamespaceTable(tx, m.namespace, m.recordId, m.op, m.payload ?? null);
-      results.push({ applied: true, serverVersion: nextVersion });
+      const successResult: MutationResult = { applied: true, serverVersion: nextVersion };
+      if (m.idempotencyKey) {
+        tx.run(
+          `INSERT INTO _sync_idempotency(key, result, version) VALUES (${tx.dialect === 'sqlite' ? '?, ?, ?' : '$1, $2, $3'})`,
+          [m.idempotencyKey, JSON.stringify(successResult), nextVersion],
+        );
+      }
+      results.push(successResult);
     }
   });
   return results;
