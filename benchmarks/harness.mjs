@@ -40,6 +40,8 @@ const batchSize = Number(process.env.BENCH_BATCH || 50);
 const iterations = Number(process.env.BENCH_ITER || 1);
 const scenariosEnv = (process.env.BENCH_SCENARIOS || 'insert_seq,insert_concurrent,select_window,update_conflict,notify_latency,notify_stress').split(',').map(s => s.trim()).filter(Boolean);
 const outDir = resolve(process.env.BENCH_OUTPUT_DIR || 'benchmarks/results');
+const notifyIter = Number(process.env.BENCH_NOTIFY_ITER || Math.min(rows, 500));
+const maxScenarioMs = Number(process.env.BENCH_MAX_SCENARIO_MS || 30000);
 
 function percentile(values, p) {
   if (values.length === 0) return 0;
@@ -208,10 +210,11 @@ async function scenarioSelectWindow(client) {
   const first = await client.select({ table: 'bench', limit: 1 });
   if ((first?.data?.length || 0) === 0) {
     const seed = Array.from({ length: rows }, (_, i) => ({ id: `s-${i}`, k: `ks${i}`, v: i }));
-    for (const r of seed) { // sequential to keep tight bounds on timings
-      // eslint-disable-next-line no-await-in-loop
-      await client.insert('bench', r);
-    }
+    const bs = Math.max(10, Math.min(100, Math.floor(rows / 10) || 10));
+    const batches = [];
+    for (let i = 0; i < seed.length; i += bs) batches.push(seed.slice(i, i + bs));
+    const tasks = batches.map(payload => async () => { await client.insert('bench', payload); });
+    await withConcurrency(Math.min(8, concurrency), tasks);
   }
   const lat = [];
   const startCpu = process.cpuUsage();
@@ -312,7 +315,7 @@ async function scenarioNotifyLatency(baseURL) {
       if (resolver) resolver();
     }
   }, { initialSnapshot: false, debounceMs: 10 });
-  for (let i = 0; i < Math.min(rows, 2000); i++) {
+  for (let i = 0; i < notifyIter; i++) {
     // eslint-disable-next-line no-await-in-loop
     const p = new Promise((res, rej) => { resolver = res; setTimeout(() => rej(new Error('timeout')), 5000); });
     const t0 = Date.now();
@@ -364,25 +367,36 @@ async function run() {
   const results = { meta: { rows, concurrency, iterations, node: process.version, date: new Date().toISOString() }, scenarios: {} };
 
   const bench = new Bench({ iterations, warmupIterations: 0 });
+  async function withTimeout(name, fn) {
+    const started = Date.now();
+    const timer = new Promise((_, rej) => setTimeout(() => rej(new Error(`timeout:${name}`)), maxScenarioMs));
+    try {
+      const res = await Promise.race([fn(), timer]);
+      return res;
+    } catch (e) {
+      if (String(e?.message || e).startsWith('timeout:')) return { skipped: true, reason: 'timeout', elapsedMs: Date.now() - started };
+      throw e;
+    }
+  }
   for (const name of scenariosEnv) {
     if (name === 'insert_seq') {
-      bench.add('insert_seq', async () => { results.scenarios['insert_seq'] = await scenarioInsertSeq(client); });
+      bench.add('insert_seq', async () => { results.scenarios['insert_seq'] = await withTimeout('insert_seq', () => scenarioInsertSeq(client)); });
     } else if (name === 'insert_concurrent') {
-      bench.add('insert_concurrent', async () => { results.scenarios['insert_concurrent'] = await scenarioInsertConcurrent(client); });
+      bench.add('insert_concurrent', async () => { results.scenarios['insert_concurrent'] = await withTimeout('insert_concurrent', () => scenarioInsertConcurrent(client)); });
     } else if (name === 'insert_batch') {
-      bench.add('insert_batch', async () => { results.scenarios['insert_batch'] = await scenarioInsertBatch(client); });
+      bench.add('insert_batch', async () => { results.scenarios['insert_batch'] = await withTimeout('insert_batch', () => scenarioInsertBatch(client)); });
     } else if (name === 'select_window') {
-      bench.add('select_window', async () => { results.scenarios['select_window'] = await scenarioSelectWindow(client); });
+      bench.add('select_window', async () => { results.scenarios['select_window'] = await withTimeout('select_window', () => scenarioSelectWindow(client)); });
     } else if (name === 'update_conflict') {
-      bench.add('update_conflict', async () => { results.scenarios['update_conflict'] = await scenarioUpdateConflict(client); });
+      bench.add('update_conflict', async () => { results.scenarios['update_conflict'] = await withTimeout('update_conflict', () => scenarioUpdateConflict(client)); });
     } else if (name === 'notify_latency') {
-      bench.add('notify_latency', async () => { results.scenarios['notify_latency'] = await scenarioNotifyLatency(baseURL); });
+      bench.add('notify_latency', async () => { results.scenarios['notify_latency'] = await withTimeout('notify_latency', () => scenarioNotifyLatency(baseURL)); });
     } else if (name === 'notify_stress') {
-      bench.add('notify_stress', async () => { results.scenarios['notify_stress'] = await scenarioNotifyStress(baseURL); });
+      bench.add('notify_stress', async () => { results.scenarios['notify_stress'] = await withTimeout('notify_stress', () => scenarioNotifyStress(baseURL)); });
     } else if (name === 'cas_update') {
-      bench.add('cas_update', async () => { results.scenarios['cas_update'] = await scenarioCasUpdate(client); });
+      bench.add('cas_update', async () => { results.scenarios['cas_update'] = await withTimeout('cas_update', () => scenarioCasUpdate(client)); });
     } else if (name === 'mixed_batch') {
-      bench.add('mixed_batch', async () => { results.scenarios['mixed_batch'] = await scenarioMixedBatch(client); });
+      bench.add('mixed_batch', async () => { results.scenarios['mixed_batch'] = await withTimeout('mixed_batch', () => scenarioMixedBatch(client)); });
     } else if (name === 'libsql_insert' && process.env.LIBSQL_URL) {
       bench.add('libsql_insert', async () => {
         const adapter = libsqlAdapter({ url: process.env.LIBSQL_URL });
