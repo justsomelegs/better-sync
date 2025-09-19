@@ -1,9 +1,9 @@
 import { createSyncEngine } from '../src/index';
-import { SQLJsExecutor } from '../src/adapters/sqljs';
+import { SQLJsAdapter } from '../src/adapters/sqljs';
 
 async function main() {
-  const db = await SQLJsExecutor.create();
-  const engine = await createSyncEngine({ db });
+  const adapter = await SQLJsAdapter.create();
+  const engine = await createSyncEngine({ adapter });
   console.log('Applied migrations:', await engine.getAppliedMigrations());
   console.log('Schema version:', await engine.getSchemaVersion());
   await engine.dispose();

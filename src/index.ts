@@ -11,9 +11,10 @@ import { applyMigrations, coreMigrations } from './migrations';
  * @returns A SyncEngine instance with basic schema/migration helpers.
  */
 export async function createSyncEngine(options: CreateSyncEngineOptions): Promise<SyncEngine> {
-  const { db, migrations = [] } = options;
+  const { adapter, migrations = [] } = options;
+  const db = adapter.session();
   const allMigrations = [...coreMigrations(), ...migrations];
-  const applied = await applyMigrations(db, allMigrations);
+  await applyMigrations(db, allMigrations);
 
   return {
     async getAppliedMigrations() {

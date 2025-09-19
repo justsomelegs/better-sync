@@ -45,6 +45,20 @@ export interface DatabaseExecutor {
 }
 
 /**
+ * A database adapter that provides executors and captures dialect specifics.
+ * This separates application concerns from the sync engine core.
+ */
+export interface DatabaseAdapter {
+  /** SQL dialect used by the underlying database. */
+  readonly dialect: Dialect;
+  /**
+   * Acquire an executor/session to run queries. Implementations may reuse a
+   * single connection or create a new one; the engine treats it as opaque.
+   */
+  session(): DatabaseExecutor;
+}
+
+/**
  * A schema migration.
  */
 export interface Migration {
@@ -58,8 +72,8 @@ export interface Migration {
  * Options for creating the sync engine.
  */
 export interface CreateSyncEngineOptions {
-  /** Database executor provided by the application. */
-  readonly db: DatabaseExecutor;
+  /** Database adapter provided by the application. */
+  readonly adapter: DatabaseAdapter;
   /** Additional app-specific migrations to run after the core set. */
   readonly migrations?: readonly Migration[];
 }
@@ -82,5 +96,34 @@ export interface SyncEngine {
    * Dispose of resources. For BYO DB, this is a no-op.
    */
   dispose(): Promise<void>;
+}
+
+/** Allowed mutation operations. */
+export type MutationOp = 'insert' | 'update' | 'delete';
+
+/**
+ * Input for a mutation to be applied transactionally.
+ */
+export interface MutationInput<TPayload = Record<string, unknown>> {
+  /** Logical namespace/entity name. */
+  namespace: string;
+  /** Primary key identifier for the record. */
+  recordId: string;
+  /** Operation to perform from the client's perspective. */
+  op: MutationOp;
+  /** Client-known version for optimistic concurrency control. */
+  clientVersion: number;
+  /** Optional payload to record in the change log. */
+  payload?: TPayload;
+}
+
+/** Result for a single mutation. */
+export interface MutationResult {
+  /** Whether the mutation was applied. */
+  applied: boolean;
+  /** The server-assigned version after processing. */
+  serverVersion: number;
+  /** Conflict information if not applied. */
+  conflict?: { reason: string; serverVersion: number };
 }
 

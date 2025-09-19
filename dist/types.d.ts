@@ -32,6 +32,19 @@ interface DatabaseExecutor {
     transaction<T>(fn: (tx: DatabaseExecutor) => Promise<T> | T): Promise<T> | T;
 }
 /**
+ * A database adapter that provides executors and captures dialect specifics.
+ * This separates application concerns from the sync engine core.
+ */
+interface DatabaseAdapter {
+    /** SQL dialect used by the underlying database. */
+    readonly dialect: Dialect;
+    /**
+     * Acquire an executor/session to run queries. Implementations may reuse a
+     * single connection or create a new one; the engine treats it as opaque.
+     */
+    session(): DatabaseExecutor;
+}
+/**
  * A schema migration.
  */
 interface Migration {
@@ -44,8 +57,8 @@ interface Migration {
  * Options for creating the sync engine.
  */
 interface CreateSyncEngineOptions {
-    /** Database executor provided by the application. */
-    readonly db: DatabaseExecutor;
+    /** Database adapter provided by the application. */
+    readonly adapter: DatabaseAdapter;
     /** Additional app-specific migrations to run after the core set. */
     readonly migrations?: readonly Migration[];
 }
@@ -66,5 +79,34 @@ interface SyncEngine {
      */
     dispose(): Promise<void>;
 }
+/** Allowed mutation operations. */
+type MutationOp = 'insert' | 'update' | 'delete';
+/**
+ * Input for a mutation to be applied transactionally.
+ */
+interface MutationInput<TPayload = Record<string, unknown>> {
+    /** Logical namespace/entity name. */
+    namespace: string;
+    /** Primary key identifier for the record. */
+    recordId: string;
+    /** Operation to perform from the client's perspective. */
+    op: MutationOp;
+    /** Client-known version for optimistic concurrency control. */
+    clientVersion: number;
+    /** Optional payload to record in the change log. */
+    payload?: TPayload;
+}
+/** Result for a single mutation. */
+interface MutationResult {
+    /** Whether the mutation was applied. */
+    applied: boolean;
+    /** The server-assigned version after processing. */
+    serverVersion: number;
+    /** Conflict information if not applied. */
+    conflict?: {
+        reason: string;
+        serverVersion: number;
+    };
+}
 
-export type { CreateSyncEngineOptions, DatabaseExecutor, Dialect, Migration, SyncEngine };
+export type { CreateSyncEngineOptions, DatabaseAdapter, DatabaseExecutor, Dialect, Migration, MutationInput, MutationOp, MutationResult, SyncEngine };

@@ -1,5 +1,5 @@
 import initSqlJs, { type Database as SQLJSDatabase } from 'sql.js';
-import type { DatabaseExecutor, Dialect } from '../types';
+import type { DatabaseAdapter, DatabaseExecutor, Dialect } from '../types';
 
 /**
  * A minimal adapter around sql.js Database implementing DatabaseExecutor.
@@ -87,6 +87,27 @@ export class SQLJsExecutor implements DatabaseExecutor {
       this.run('ROLLBACK');
       throw err;
     }
+  }
+}
+
+/**
+ * Database adapter for sql.js. Provides executors for the engine to use.
+ */
+export class SQLJsAdapter implements DatabaseAdapter {
+  public readonly dialect: Dialect = 'sqlite';
+  private readonly executor: SQLJsExecutor;
+
+  private constructor(executor: SQLJsExecutor) {
+    this.executor = executor;
+  }
+
+  static async create(): Promise<SQLJsAdapter> {
+    const exec = await SQLJsExecutor.create();
+    return new SQLJsAdapter(exec);
+  }
+
+  session(): DatabaseExecutor {
+    return this.executor;
   }
 }
 

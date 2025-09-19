@@ -1,7 +1,8 @@
 import { coreMigrations, applyMigrations } from './migrations.mjs';
 
 async function createSyncEngine(options) {
-  const { db, migrations = [] } = options;
+  const { adapter, migrations = [] } = options;
+  const db = adapter.session();
   const allMigrations = [...coreMigrations(), ...migrations];
   await applyMigrations(db, allMigrations);
   return {

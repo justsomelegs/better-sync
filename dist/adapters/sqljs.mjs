@@ -75,5 +75,19 @@ class SQLJsExecutor {
     }
   }
 }
+class SQLJsAdapter {
+  constructor(executor) {
+    __publicField(this, "dialect", "sqlite");
+    __publicField(this, "executor");
+    this.executor = executor;
+  }
+  static async create() {
+    const exec = await SQLJsExecutor.create();
+    return new SQLJsAdapter(exec);
+  }
+  session() {
+    return this.executor;
+  }
+}
 
-export { SQLJsExecutor };
+export { SQLJsAdapter, SQLJsExecutor };

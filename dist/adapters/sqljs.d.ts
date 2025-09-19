@@ -1,4 +1,4 @@
-import { DatabaseExecutor, Dialect } from '../types.js';
+import { DatabaseExecutor, Dialect, DatabaseAdapter } from '../types.js';
 
 /**
  * A minimal adapter around sql.js Database implementing DatabaseExecutor.
@@ -15,5 +15,15 @@ declare class SQLJsExecutor implements DatabaseExecutor {
     get<TRecord extends Record<string, unknown> = Record<string, unknown>>(sql: string, params?: readonly unknown[]): TRecord | undefined;
     transaction<T>(fn: (tx: DatabaseExecutor) => Promise<T> | T): Promise<T> | T;
 }
+/**
+ * Database adapter for sql.js. Provides executors for the engine to use.
+ */
+declare class SQLJsAdapter implements DatabaseAdapter {
+    readonly dialect: Dialect;
+    private readonly executor;
+    private constructor();
+    static create(): Promise<SQLJsAdapter>;
+    session(): DatabaseExecutor;
+}
 
-export { SQLJsExecutor };
+export { SQLJsAdapter, SQLJsExecutor };
