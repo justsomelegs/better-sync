@@ -1,5 +1,6 @@
 import type { CreateSyncEngineOptions, SyncEngine } from './types';
 import { applyMigrations, coreMigrations } from './migrations';
+import { applyMutations } from './mutate';
 
 /**
  * Create the Sync Engine instance.
@@ -32,8 +33,8 @@ export async function createSyncEngine(options: CreateSyncEngineOptions): Promis
     async dispose() {
       // BYO DB: nothing to dispose
     },
-    async mutate() {
-      throw new Error('mutate() not implemented yet (will be added in Step 2)');
+    async mutate(mutations) {
+      return applyMutations(db, mutations);
     },
   };
 }

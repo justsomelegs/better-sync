@@ -9,6 +9,13 @@ async function main() {
   const engine = await createSyncEngine({ database });
   console.log('Applied migrations:', await engine.getAppliedMigrations());
   console.log('Schema version:', await engine.getSchemaVersion());
+  const [ins] = await engine.mutate([
+    { namespace: 'todos', recordId: '1', op: 'insert', clientVersion: 0, payload: { title: 'hello' } },
+  ]);
+  const [upd] = await engine.mutate([
+    { namespace: 'todos', recordId: '1', op: 'update', clientVersion: ins.serverVersion, payload: { title: 'world' } },
+  ]);
+  console.log('Versions:', { insert: ins.serverVersion, update: upd.serverVersion });
   await engine.dispose();
 }
 

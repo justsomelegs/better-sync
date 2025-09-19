@@ -1,26 +1,27 @@
-import { coreMigrations, applyMigrations } from './migrations.mjs';
+import type { DatabaseExecutor, MutationInput, MutationResult } from './types';
 
-function ensureNamespaceTable(db, namespace) {
-  if (db.dialect === "sqlite") {
+function ensureNamespaceTable(db: DatabaseExecutor, namespace: string) {
+  if (db.dialect === 'sqlite') {
     db.run(
       `CREATE TABLE IF NOT EXISTS ${JSON.stringify(namespace)} (
         id TEXT PRIMARY KEY,
         doc TEXT
-      )`
+      )`,
     );
   } else {
     db.run(
       `CREATE TABLE IF NOT EXISTS ${JSON.stringify(namespace)} (
         id TEXT PRIMARY KEY,
         doc JSONB
-      )`
+      )`,
     );
   }
 }
-async function getNextGlobalVersion(db) {
-  if (db.dialect === "sqlite") {
-    const row = await db.get(
-      `SELECT version FROM _sync_versions WHERE key = 'global'`
+
+async function getNextGlobalVersion(db: DatabaseExecutor): Promise<number> {
+  if (db.dialect === 'sqlite') {
+    const row = await db.get<{ version: number }>(
+      `SELECT version FROM _sync_versions WHERE key = 'global'`,
     );
     if (!row) {
       await db.run(`INSERT INTO _sync_versions(key, version) VALUES ('global', 1)`);
@@ -30,8 +31,8 @@ async function getNextGlobalVersion(db) {
     await db.run(`UPDATE _sync_versions SET version = ? WHERE key = 'global'`, [next]);
     return next;
   } else {
-    const row = await db.get(
-      `SELECT version FROM _sync_versions WHERE key = 'global'`
+    const row = await db.get<{ version: number }>(
+      `SELECT version FROM _sync_versions WHERE key = 'global'`,
     );
     if (!row) {
       await db.run(`INSERT INTO _sync_versions(key, version) VALUES ('global', 1)`);
@@ -42,66 +43,88 @@ async function getNextGlobalVersion(db) {
     return next;
   }
 }
-function upsertClock(db, namespace, recordId, serverVersion) {
-  if (db.dialect === "sqlite") {
+
+function upsertClock(db: DatabaseExecutor, namespace: string, recordId: string, serverVersion: number) {
+  if (db.dialect === 'sqlite') {
     db.run(
       `INSERT INTO _sync_clock(namespace, record_id, server_version) VALUES (?, ?, ?)
        ON CONFLICT(namespace, record_id) DO UPDATE SET server_version = excluded.server_version`,
-      [namespace, recordId, serverVersion]
+      [namespace, recordId, serverVersion],
     );
   } else {
     db.run(
       `INSERT INTO _sync_clock(namespace, record_id, server_version) VALUES ($1, $2, $3)
        ON CONFLICT(namespace, record_id) DO UPDATE SET server_version = EXCLUDED.server_version`,
-      [namespace, recordId, serverVersion]
+      [namespace, recordId, serverVersion],
     );
   }
 }
-function insertChange(db, namespace, recordId, version, op, payload) {
-  if (db.dialect === "sqlite") {
+
+function insertChange(
+  db: DatabaseExecutor,
+  namespace: string,
+  recordId: string,
+  version: number,
+  op: string,
+  payload: unknown,
+) {
+  if (db.dialect === 'sqlite') {
     db.run(
       `INSERT INTO _sync_changes(namespace, record_id, version, op, payload) VALUES (?, ?, ?, ?, ?)`,
-      [namespace, recordId, version, op, payload == null ? null : JSON.stringify(payload)]
+      [namespace, recordId, version, op, payload == null ? null : JSON.stringify(payload)],
     );
   } else {
     db.run(
       `INSERT INTO _sync_changes(namespace, record_id, version, op, payload) VALUES ($1, $2, $3, $4, $5)`,
-      [namespace, recordId, version, op, payload == null ? null : payload]
+      [namespace, recordId, version, op, payload == null ? null : payload],
     );
   }
 }
-function applyToNamespaceTable(db, namespace, recordId, op, payload) {
+
+function applyToNamespaceTable(
+  db: DatabaseExecutor,
+  namespace: string,
+  recordId: string,
+  op: 'insert' | 'update' | 'delete',
+  payload: unknown,
+) {
   ensureNamespaceTable(db, namespace);
-  if (op === "delete") {
-    db.run(`DELETE FROM ${JSON.stringify(namespace)} WHERE id = ${db.dialect === "sqlite" ? "?" : "$1"}`, [recordId]);
+  if (op === 'delete') {
+    db.run(`DELETE FROM ${JSON.stringify(namespace)} WHERE id = ${db.dialect === 'sqlite' ? '?' : '$1'}`, [recordId]);
     return;
   }
-  if (db.dialect === "sqlite") {
+  // server-wins: last write replaces doc
+  if (db.dialect === 'sqlite') {
     db.run(
       `INSERT INTO ${JSON.stringify(namespace)}(id, doc) VALUES (?, ?)
        ON CONFLICT(id) DO UPDATE SET doc = excluded.doc`,
-      [recordId, JSON.stringify(payload ?? null)]
+      [recordId, JSON.stringify(payload ?? null)],
     );
   } else {
     db.run(
       `INSERT INTO ${JSON.stringify(namespace)}(id, doc) VALUES ($1, $2)
        ON CONFLICT(id) DO UPDATE SET doc = EXCLUDED.doc`,
-      [recordId, payload ?? null]
+      [recordId, payload ?? null],
     );
   }
 }
-async function applyMutations(db, mutations) {
-  const results = [];
+
+export async function applyMutations(
+  db: DatabaseExecutor,
+  mutations: readonly MutationInput[],
+): Promise<MutationResult[]> {
+  const results: MutationResult[] = [];
   await db.transaction(async (tx) => {
     for (const m of mutations) {
-      const clock = await tx.get(
-        `SELECT server_version FROM _sync_clock WHERE namespace = ${tx.dialect === "sqlite" ? "?" : "$1"} AND record_id = ${tx.dialect === "sqlite" ? "?" : "$2"}`,
-        [m.namespace, m.recordId]
+      const clock = await tx.get<{ server_version: number }>(
+        `SELECT server_version FROM _sync_clock WHERE namespace = ${tx.dialect === 'sqlite' ? '?' : '$1'} AND record_id = ${tx.dialect === 'sqlite' ? '?' : '$2'}`,
+        [m.namespace, m.recordId],
       );
       const current = clock?.server_version ?? 0;
       if (current !== m.clientVersion) {
-        insertChange(tx, m.namespace, m.recordId, current, "update", m.payload ?? null);
-        results.push({ applied: false, serverVersion: current, conflict: { reason: "version_mismatch", serverVersion: current } });
+        // conflict: server wins, record intent as a change for audit
+        insertChange(tx, m.namespace, m.recordId, current, 'update', m.payload ?? null);
+        results.push({ applied: false, serverVersion: current, conflict: { reason: 'version_mismatch', serverVersion: current } });
         continue;
       }
       const nextVersion = await getNextGlobalVersion(tx);
@@ -114,30 +137,3 @@ async function applyMutations(db, mutations) {
   return results;
 }
 
-async function createSyncEngine(options) {
-  const { database, migrations = [] } = options;
-  const db = database.session();
-  const allMigrations = [...coreMigrations(), ...migrations];
-  await applyMigrations(db, allMigrations);
-  return {
-    async getAppliedMigrations() {
-      const rows = await db.all(
-        `SELECT id FROM _sync_migrations ORDER BY applied_at ASC, id ASC`
-      );
-      return rows.map((r) => r.id);
-    },
-    async getSchemaVersion() {
-      const row = await db.get(
-        `SELECT COUNT(1) as n FROM _sync_migrations`
-      );
-      return row?.n ?? 0;
-    },
-    async dispose() {
-    },
-    async mutate(mutations) {
-      return applyMutations(db, mutations);
-    }
-  };
-}
-
-export { createSyncEngine };
