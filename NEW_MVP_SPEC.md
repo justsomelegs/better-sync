@@ -89,6 +89,22 @@ Non-goals (MVP):
 
 ---
 
+## Configuration
+
+Engine options (defaults shown):
+- `mode`: `'sse'` | `'sse-poll-fallback'` | `'poll'` (default `'sse'`)
+- `realtime.sse.keepaliveMs`: 15000
+- `outbox.retentionMs`: 48h
+- `outbox.maxEventsPerFrame`: 1000
+- `limits.maxPayloadBytes`: 1_000_000
+- `limits.maxBatchRows`: 100
+- `idempotency.ttlMs`: 10 * 60 * 1000
+- `logging.level`: `'info' | 'warn' | 'error' | 'debug'` (default `'info'`)
+
+Adapter options are adapter-specific (e.g., SQLite URL, WAL mode docs in guidance only).
+
+---
+
 ## Schema Model (BYO, Standard Schema first-class)
 
 Core:
@@ -263,6 +279,16 @@ Defaults:
 
 ---
 
+## Security & Privacy
+
+- Stateless library: credentials (DB DSNs, JWT secrets) are app-provided.
+- Auth is BYO; the engine consumes headers/cookies via `auth.getUser` and enforces via `policies`.
+- Logging: avoid sensitive fields; structured logs gated by `logging.level`.
+- CSRF: mutations are POST-only; recommend same-origin; integrate your framework's CSRF if needed.
+- CORS: left to the host app; library does not set CORS headers.
+
+---
+
 ## Errors
 
 Standard JSON error shape:
@@ -296,11 +322,33 @@ Examples:
 
 ---
 
+## Adapter Capabilities
+
+Adapters report capability flags so the engine can tailor behavior:
+- `supportsTransactions: boolean`
+- `supportsReturning: boolean`
+- `supportsStreamingReads: boolean`
+- `supportsServerSentEvents: boolean` (environment/runtime capability)
+- `timePrecisionMs: number`
+
+Engine falls back to safe semantics when a capability is missing (e.g., windowed selects instead of streaming).
+
+---
+
 ## Runtime & Compatibility
 
 - Server runtime: Node.js 18+ (Bun compatible); SQLite driver determines exact minimum.
 - Client: ESM-only; works in browsers and Node (SSR-safe). SSE via EventSource; fetch-based stream for Node.
 - CORS & CSRF: library does not configure CORS/CSRF; recommend same-origin and POST for mutations.
+
+---
+
+## Serverless Guidance
+
+- Stateless handlers; no in-memory event buffers.
+- Prefer `'sse'` where platforms permit long-lived connections; otherwise `'sse-poll-fallback'` or `'poll'`.
+- Keep functions small; reuse DB connections only where the platform guarantees isolation; otherwise open per request.
+- Cold starts are safe; resume via `_sync_outbox` and `Last-Event-ID`.
 
 ---
 
@@ -413,6 +461,16 @@ Methods:
 
 ---
 
+## Testing & Benchmarks
+
+- Include a bench harness to measure:
+  - Mutations/sec under contention
+  - Select window latency and throughput
+  - SSE catch-up latency and event size distribution
+- Record p50/p95/p99; test across Node versions and adapters (official SQLite vs fallback; ORM-backed remote SQLite).
+
+---
+
 ## CLI (MVP)
 
 - `npx just-sync init --adapter sqlite --db-url "file:./app.db"`
@@ -438,6 +496,15 @@ Behavior:
 - Errors: standardized JSON codes
 - CLI: schema generation and checks; user applies migrations
 - Out-of-scope: external write capture, advanced queries, built-in auth provider
+
+---
+
+## Known Limitations (MVP)
+
+- External writers not reflected (requires CDC/triggers; post‑MVP).
+- Field-level merge/CRDTs not supported in MVP.
+- Clustered event ordering beyond a single process is post‑MVP.
+- Rich server-side query pushdown is post‑MVP.
 
 ---
 
