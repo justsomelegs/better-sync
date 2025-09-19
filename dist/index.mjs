@@ -114,6 +114,27 @@ async function applyMutations(db, mutations) {
   return results;
 }
 
+async function pullChangesSince(db, options) {
+  const since = options.since ?? 0;
+  const limit = options.limit ?? 1e3;
+  const ns = options.namespace;
+  let sql = `SELECT id, namespace, record_id, version, op, payload, ts FROM _sync_changes WHERE version > ${db.dialect === "sqlite" ? "?" : "$1"}`;
+  const params = [since];
+  if (ns) {
+    sql += ` AND namespace = ${db.dialect === "sqlite" ? "?" : "$2"}`;
+    params.push(ns);
+  }
+  sql += ` ORDER BY version ASC, id ASC LIMIT ${db.dialect === "sqlite" ? "?" : ns ? "$3" : "$2"}`;
+  params.push(limit);
+  const rows = await db.all(sql, params);
+  const normalized = rows.map((r) => ({
+    ...r,
+    payload: typeof r.payload === "string" ? r.payload ? JSON.parse(r.payload) : null : r.payload
+  }));
+  const lastVersion = normalized.length > 0 ? normalized[normalized.length - 1].version : since;
+  return { changes: normalized, lastVersion };
+}
+
 async function createSyncEngine(options) {
   const { database, migrations = [] } = options;
   const db = database.session();
@@ -136,6 +157,9 @@ async function createSyncEngine(options) {
     },
     async mutate(mutations) {
       return applyMutations(db, mutations);
+    },
+    async pull(options2) {
+      return pullChangesSince(db, options2);
     }
   };
 }

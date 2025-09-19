@@ -1,6 +1,7 @@
 import type { CreateSyncEngineOptions, SyncEngine } from './types';
 import { applyMigrations, coreMigrations } from './migrations';
 import { applyMutations } from './mutate';
+import { pullChangesSince } from './pull';
 
 /**
  * Create the Sync Engine instance.
@@ -35,6 +36,9 @@ export async function createSyncEngine(options: CreateSyncEngineOptions): Promis
     },
     async mutate(mutations) {
       return applyMutations(db, mutations);
+    },
+    async pull(options) {
+      return pullChangesSince(db, options);
     },
   };
 }

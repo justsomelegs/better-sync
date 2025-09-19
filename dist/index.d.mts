@@ -1,5 +1,5 @@
 import { CreateSyncEngineOptions, SyncEngine } from './types.mjs';
-export { DatabaseAdapter, DatabaseExecutor, Dialect, Migration, MutationInput, MutationOp, MutationResult } from './types.mjs';
+export { ChangeRow, DatabaseAdapter, DatabaseExecutor, Dialect, Migration, MutationInput, MutationOp, MutationResult, PullOptions, PullResult } from './types.mjs';
 
 /**
  * Create the Sync Engine instance.

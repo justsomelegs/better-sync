@@ -16,6 +16,8 @@ async function main() {
     { namespace: 'todos', recordId: '1', op: 'update', clientVersion: ins.serverVersion, payload: { title: 'world' } },
   ]);
   console.log('Versions:', { insert: ins.serverVersion, update: upd.serverVersion });
+  const pulled = await engine.pull({ since: 0, limit: 10 });
+  console.log('Pulled changes:', pulled);
   await engine.dispose();
 }
 

@@ -101,6 +101,11 @@ export interface SyncEngine {
    * Apply one or more mutations transactionally with durable versioning.
    */
   mutate(mutations: readonly MutationInput[]): Promise<MutationResult[]>;
+
+  /**
+   * Pull change rows since a given version, optionally filtered by namespace and limited.
+   */
+  pull(options: PullOptions): Promise<PullResult>;
 }
 
 /** Allowed mutation operations. */
@@ -130,5 +135,32 @@ export interface MutationResult {
   serverVersion: number;
   /** Conflict information if not applied. */
   conflict?: { reason: string; serverVersion: number };
+}
+
+/** Options to fetch changes since a version. */
+export interface PullOptions {
+  /** Exclusive starting version (i.e., fetch changes with version > since). */
+  since: number;
+  /** Optional namespace filter. */
+  namespace?: string;
+  /** Optional limit on number of rows returned. */
+  limit?: number;
+}
+
+/** A change row returned by pull. */
+export interface ChangeRow<TPayload = unknown> {
+  id: number;
+  namespace: string;
+  record_id: string;
+  version: number;
+  op: 'insert' | 'update' | 'delete';
+  payload: TPayload | null;
+  ts: string;
+}
+
+/** Result of a pull request. */
+export interface PullResult<TPayload = unknown> {
+  changes: ChangeRow<TPayload>[];
+  lastVersion: number;
 }
 
